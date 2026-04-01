@@ -23,6 +23,7 @@ public class AudioMaster {
 
     private AudioFormat mOutFormat;
     private boolean mIsLoading = false;
+    private Resampler mResampler = null;
 
     private final ExecutorService audioLoadExecutor = Executors.newSingleThreadExecutor();
 
@@ -54,6 +55,16 @@ public class AudioMaster {
                 Logger.d("[AudioMaster] Target: sampleRate=" + mOutFormat.getSampleRate()
                         + " channelCount=" + mOutFormat.getChannelCount()
                         + " encoding=" + mOutFormat.getEncoding());
+
+                // Create Resampler once for this file so state is preserved across chunks
+                ResamplerChannel inChannel = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) == 1
+                        ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
+                ResamplerChannel outChannel = mOutFormat.getChannelCount() == 1
+                        ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
+                mResampler = new Resampler(new ResamplerConfiguration(
+                        ResamplerQuality.BEST, inChannel,
+                        format.getInteger(MediaFormat.KEY_SAMPLE_RATE),
+                        outChannel, mOutFormat.getSampleRate()));
             } else {
                 Logger.d("[AudioMaster] Target format not yet set — will be skipped until set");
             }
@@ -117,7 +128,17 @@ public class AudioMaster {
             } else if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 format = codec.getOutputFormat();
                 Logger.d("Format changed to " + format);
-                // Handle format change if necessary
+                // Recreate resampler with updated source format to avoid pitch/speed drift
+                if (mOutFormat != null) {
+                    ResamplerChannel inChannel = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) == 1
+                            ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
+                    ResamplerChannel outChannel = mOutFormat.getChannelCount() == 1
+                            ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
+                    mResampler = new Resampler(new ResamplerConfiguration(
+                            ResamplerQuality.BEST, inChannel,
+                            format.getInteger(MediaFormat.KEY_SAMPLE_RATE),
+                            outChannel, mOutFormat.getSampleRate()));
+                }
             }
 
             if (!mIsLoading) {
@@ -130,6 +151,7 @@ public class AudioMaster {
         codec.release();
         extractor.release();
         mOutFormat = null;
+        mResampler = null;
 
         Logger.d("[AudioMaster] Loading done — raw PCM decoded: " + totalPcmBytes + " bytes");
         mIsLoading = false;
@@ -142,38 +164,14 @@ public class AudioMaster {
         }
 
         // Guard: if no output format has been set yet, skip silently.
-        // This can happen in a tight race before AudioRecord::set() fires.
-        if (mOutFormat == null) {
-            Logger.d("processInBuffer skipped: output format not yet set");
+        if (mOutFormat == null || mResampler == null) {
+            Logger.d("processInBuffer skipped: output format or resampler not yet set");
             return;
         }
 
-        ResamplerChannel inChannel;
-        ResamplerChannel outChannel;
-
-        if (source.getInteger(MediaFormat.KEY_CHANNEL_COUNT) == 1)
-            inChannel = ResamplerChannel.MONO;
-        else
-            inChannel = ResamplerChannel.STEREO;
-
-        if (mOutFormat.getChannelCount() == 1)
-            outChannel = ResamplerChannel.MONO;
-        else
-            outChannel = ResamplerChannel.STEREO;
-
-        ResamplerConfiguration configuration = new ResamplerConfiguration(ResamplerQuality.BEST, inChannel,
-                source.getInteger(MediaFormat.KEY_SAMPLE_RATE), outChannel, mOutFormat.getSampleRate());
-//        if (mBuffer.size()) {
-//            Logger.d(configuration.toString());
-//        }
-
-        Resampler resampler = new Resampler(configuration);
-        byte[] resampledChunk = resampler.resample(bufferChunk);
-
-//        if (mBuffer.size() == 0) {
-//            Logger.d("Resampling done for first chunk (" + resampledChunk.length + ")");
-//        }
-
+        // Reuse the stateful Resampler (created in load()) so sample history is
+        // preserved across chunks — avoids clicks/artefacts at every chunk boundary.
+        byte[] resampledChunk = mResampler.resample(bufferChunk);
         onBufferChunkLoaded(resampledChunk);
     }
 

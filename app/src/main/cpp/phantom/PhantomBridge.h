@@ -6,6 +6,7 @@
 #define PHANTOMMIC_PHANTOMBRIDGE_H
 
 #include <jni.h>
+#include <mutex>
 
 class PhantomBridge {
 public:
@@ -33,6 +34,9 @@ private:
     jbyte* m_buffer = nullptr;
 
     int mAudioFormat = 0x1;
+    std::mutex m_mutex;
+
+    bool overwrite_buffer_locked(char* buffer, int size);
 };
 
 #endif //PHANTOMMIC_PHANTOMBRIDGE_H

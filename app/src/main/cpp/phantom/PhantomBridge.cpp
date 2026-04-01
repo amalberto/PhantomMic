@@ -49,6 +49,8 @@ void PhantomBridge::load(JNIEnv *env) {
 PhantomBridge::PhantomBridge(jobject j_phantomManager) : j_phantomManager(j_phantomManager) {}
 
 void PhantomBridge::on_buffer_chunk_loaded(jbyte *buffer, jsize size) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (m_buffer == nullptr) {
         m_buffer = (jbyte*) malloc(m_buffer_size);
     }
@@ -79,13 +81,23 @@ void PhantomBridge::on_buffer_chunk_loaded(jbyte *buffer, jsize size) {
 }
 
 bool PhantomBridge::overwrite_buffer(char* buffer, int size) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return overwrite_buffer_locked(buffer, size);
+}
+
+bool PhantomBridge::overwrite_buffer_locked(char* buffer, int size) {
     if (m_buffer_read_position + size > m_buffer_write_position) {
         if (m_buffer_loaded) {
+            // Loop: fill remainder then wrap
             int until_bounds = m_buffer_write_position - m_buffer_read_position;
-            overwrite_buffer(buffer, until_bounds);
+            if (until_bounds > 0) {
+                memcpy(buffer, m_buffer + m_buffer_read_position, until_bounds);
+            }
             m_buffer_read_position = 0;
-            return overwrite_buffer(buffer + until_bounds, size - until_bounds);
+            return overwrite_buffer_locked(buffer + until_bounds, size - until_bounds);
         }
+        // Still loading: inject silence so WhatsApp gets valid PCM
+        memset(buffer, 0, size);
         return false;
     }
 
