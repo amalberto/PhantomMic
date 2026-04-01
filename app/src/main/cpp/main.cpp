@@ -70,6 +70,14 @@ void  stop_hook(void* thiz) {
     g_phantomBridge->unload(env);
 }
 
+// AUDIO_SOURCE_* constants (keep in sync with AudioSource.aidl)
+static constexpr int32_t AUDIO_SOURCE_DEFAULT             = 0;
+static constexpr int32_t AUDIO_SOURCE_MIC                 = 1;
+static constexpr int32_t AUDIO_SOURCE_VOICE_UPLINK        = 2;
+static constexpr int32_t AUDIO_SOURCE_VOICE_DOWNLINK      = 3;
+static constexpr int32_t AUDIO_SOURCE_VOICE_CALL          = 4;
+static constexpr int32_t AUDIO_SOURCE_VOICE_COMMUNICATION = 7;
+
 int32_t (*set_backup)(void* thiz, int32_t inputSource, uint32_t sampleRate, uint32_t format,
                       uint32_t channelMask, size_t frameCount, void* callback_ptr, void* callback_refs,
                       uint32_t notificationFrames, bool threadCanCallJava, int32_t sessionId,
@@ -83,8 +91,8 @@ int32_t set_hook(void* thiz, int32_t inputSource, uint32_t sampleRate, uint32_t 
                  int selectedDeviceId, int selectedMicDirection, float microphoneFieldDimension,
                  int32_t maxSharedAudioHistoryMs) {
 
-    LOGI("[set_hook] PRE  sampleRate=%u format=0x%x channelMask=0x%x frameCount=%zu",
-         sampleRate, format, channelMask, frameCount);
+    LOGI("[set_hook] PRE  inputSource=%d sampleRate=%u format=0x%x channelMask=0x%x frameCount=%zu",
+         inputSource, sampleRate, format, channelMask, frameCount);
 
     int32_t result = set_backup(thiz, inputSource, sampleRate, format, channelMask, frameCount,
                                 callback_ptr, callback_refs, notificationFrames, threadCanCallJava,
@@ -92,14 +100,53 @@ int32_t set_hook(void* thiz, int32_t inputSource, uint32_t sampleRate, uint32_t 
                                 selectedDeviceId, selectedMicDirection, microphoneFieldDimension,
                                 maxSharedAudioHistoryMs);
 
-    LOGI("[set_hook] POST result=%d sampleRate=%u format=0x%x channelMask=0x%x",
-         result, sampleRate, format, channelMask);
+    LOGI("[set_hook] POST result=%d inputSource=%d sampleRate=%u format=0x%x channelMask=0x%x",
+         result, inputSource, sampleRate, format, channelMask);
+
+    // Permissive fallback: if the original inputSource fails, retry with progressively
+    // simpler sources. On Android 12+ AudioFlinger can reject VOICE_COMMUNICATION or
+    // VOICE_UPLINK/DOWNLINK when the audio policy denies capture for that source type.
+    if (result != 0 && inputSource != AUDIO_SOURCE_DEFAULT) {
+        static const int32_t fallback_sources[] = {
+            AUDIO_SOURCE_MIC,
+            AUDIO_SOURCE_DEFAULT
+        };
+        for (int32_t fb : fallback_sources) {
+            if (fb == inputSource) continue;
+            LOGI("[set_hook] Retrying with inputSource=%d (was %d, result=%d)",
+                 fb, inputSource, result);
+            result = set_backup(thiz, fb, sampleRate, format, channelMask, frameCount,
+                                callback_ptr, callback_refs, notificationFrames, threadCanCallJava,
+                                sessionId, transferType, flags, uid, pid, pAttributes,
+                                selectedDeviceId, selectedMicDirection, microphoneFieldDimension,
+                                maxSharedAudioHistoryMs);
+            LOGI("[set_hook] Fallback inputSource=%d result=%d", fb, result);
+            if (result == 0) break;
+        }
+    }
 
     JNIEnv* env;
     JVM->AttachCurrentThread(&env, nullptr);
     g_phantomBridge->update_audio_format(env, sampleRate, format, channelMask);
     g_phantomBridge->load(env);
 
+    return result;
+}
+
+// AudioRecord::start(AudioSystem::sync_event_t, audio_session_t)
+// Symbol: _ZN7android11AudioRecord5startENS_11AudioSystem12sync_event_tE15audio_session_t
+int32_t (*start_backup)(void* thiz, int32_t syncEvent, int32_t triggerSession);
+int32_t start_hook(void* thiz, int32_t syncEvent, int32_t triggerSession) {
+    int32_t result = start_backup(thiz, syncEvent, triggerSession);
+    LOGI("[start_hook] result=%d syncEvent=%d", result, syncEvent);
+
+    // If the real start() failed (typically because set() failed and mStatus != NO_ERROR),
+    // return success so WhatsApp proceeds past the "cannot configure recorder" dialog.
+    // Audio data is still served by obtainBuffer_hook when the recording thread calls it.
+    if (result != 0) {
+        LOGW("[start_hook] start() failed with %d — returning 0 (permissive mode)", result);
+        result = 0;
+    }
     return result;
 }
 
@@ -166,6 +213,15 @@ Java_tn_amin_phantom_1mic_PhantomManager_nativeHook(JNIEnv *env, jobject thiz) {
         LOGE("AudioRecord::set symbol not found — format detection unavailable, using PCM default");
         // Trigger load now with the pre-initialised PCM default format
         g_phantomBridge->load(env);
+    }
+
+    uintptr_t start_symbol = HookCompat::get_start_symbol(g_libTargetELF);
+    LOGI("AudioRecord::start at %p", (void*) start_symbol);
+    if (start_symbol != 0) {
+        hook_func((void*) start_symbol, (void*) start_hook, (void**) &start_backup);
+        LOGI("Hooked AudioRecord::start");
+    } else {
+        LOGW("AudioRecord::start symbol not found — permissive start not available");
     }
 }
 

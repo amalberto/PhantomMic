@@ -45,6 +45,13 @@ namespace HookCompat {
         });
     }
 
+    uintptr_t get_start_symbol(ElfScanner elfScanner) {
+        return get_symbol(elfScanner, {
+            // Android 5+ (API 21+)
+            "_ZN7android11AudioRecord5startENS_11AudioSystem12sync_event_tE15audio_session_t"
+        });
+    }
+
     uintptr_t get_obtainBuffer_symbol(ElfScanner elfScanner) {
         return get_symbol(elfScanner, {
                 "_ZN7android11AudioRecord12obtainBufferEPNS0_6BufferEPK8timespecPS3_Pj",
