@@ -44,59 +44,43 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     private void loadNativeLibrary() {
-        // 1. BaseDexClassLoader.findLibrary — the most reliable API-level approach.
-        //    The module classloader (MainHook's) has the correct nativeLibraryPathElements.
+        // The .so IS extracted to disk by the installer (extractNativeLibs=true).
+        // Path: {apkDir}/lib/arm64/libxposedlab.so
+        // LSPosed's classloader string contains: module=/data/app/.../{pkg}-hash/base.apk
+        // We parse that to derive the parent dir without needing directory listing (no perms).
         try {
-            ClassLoader cl = MainHook.class.getClassLoader();
-            if (cl instanceof dalvik.system.BaseDexClassLoader) {
-                String path = ((dalvik.system.BaseDexClassLoader) cl).findLibrary("xposedlab");
-                Logger.d("findLibrary xposedlab -> " + path);
-                if (path != null) {
-                    System.load(path);
-                    Logger.d("System.load xposedlab OK (findLibrary)");
-                    return;
-                }
-            }
-        } catch (Throwable t) {
-            Logger.d("findLibrary attempt failed: " + t.getMessage());
-        }
+            String clStr = MainHook.class.getClassLoader().toString();
+            Logger.d("ClassLoader: " + clStr.substring(0, Math.min(300, clStr.length())));
 
-        // 2. Standard loadLibrary — works if LSPosed configures native lib dir correctly.
-        try {
-            System.loadLibrary("xposedlab");
-            Logger.d("loadLibrary xposedlab OK (standard)");
-            return;
-        } catch (Throwable t) {
-            Logger.d("loadLibrary standard failed: " + t.getMessage());
-        }
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("module=([^,\\]]+/base\\.apk)")
+                    .matcher(clStr);
+            if (m.find()) {
+                String apkPath = m.group(1);
+                File appDir = new File(apkPath).getParentFile();
+                Logger.d("APK parent dir: " + appDir);
 
-        // 3. Scan /data/app/ for the module package directory.
-        try {
-            File appDir = new File("/data/app/");
-            File[] dirs1 = appDir.listFiles();
-            if (dirs1 != null) {
-                for (File d1 : dirs1) {
-                    File[] dirs2 = d1.listFiles();
-                    if (dirs2 == null) continue;
-                    for (File d2 : dirs2) {
-                        if (!d2.getName().startsWith("tn.amin.phantom_mic")) continue;
-                        for (String abi : new String[]{"arm64-v8a", "arm64"}) {
-                            File soFile = new File(d2, "lib/" + abi + "/libxposedlab.so");
-                            Logger.d("Scan trying: " + soFile + " exists=" + soFile.exists());
-                            if (soFile.exists()) {
-                                System.load(soFile.getAbsolutePath());
-                                Logger.d("System.load xposedlab OK (scan: " + soFile + ")");
-                                return;
-                            }
-                        }
+                String primaryAbi = android.os.Build.SUPPORTED_ABIS[0]; // e.g. arm64-v8a
+                String canonAbi = primaryAbi.contains("64") ? "arm64" : "arm";
+
+                for (String abiDir : new String[]{canonAbi, primaryAbi, "arm64", "arm64-v8a"}) {
+                    File soFile = new File(appDir, "lib/" + abiDir + "/libxposedlab.so");
+                    Logger.d("Trying: " + soFile.getAbsolutePath() + " exists=" + soFile.exists());
+                    if (soFile.exists()) {
+                        System.load(soFile.getAbsolutePath());
+                        Logger.d("System.load xposedlab OK (" + abiDir + ")");
+                        return;
                     }
                 }
+                Logger.d("No .so found under " + appDir + "/lib/");
+            } else {
+                Logger.d("Could not parse APK path from classloader string");
             }
         } catch (Throwable t) {
-            Logger.d("Scan load failed: " + t.getMessage());
+            Logger.d("loadNativeLibrary failed: " + t);
         }
 
-        Logger.d("ERROR: could not load libxposedlab.so from any path");
+        Logger.d("ERROR: could not load libxposedlab.so");
     }
 
     private void doHook(XC_LoadPackage.LoadPackageParam lpparam) {
