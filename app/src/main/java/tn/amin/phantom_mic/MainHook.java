@@ -44,36 +44,33 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     private void loadNativeLibrary() {
-        // 1. Standard path — works if LSPosed configures the native lib dir correctly.
+        // 1. BaseDexClassLoader.findLibrary — the most reliable API-level approach.
+        //    The module classloader (MainHook's) has the correct nativeLibraryPathElements.
+        try {
+            ClassLoader cl = MainHook.class.getClassLoader();
+            if (cl instanceof dalvik.system.BaseDexClassLoader) {
+                String path = ((dalvik.system.BaseDexClassLoader) cl).findLibrary("xposedlab");
+                Logger.d("findLibrary xposedlab -> " + path);
+                if (path != null) {
+                    System.load(path);
+                    Logger.d("System.load xposedlab OK (findLibrary)");
+                    return;
+                }
+            }
+        } catch (Throwable t) {
+            Logger.d("findLibrary attempt failed: " + t.getMessage());
+        }
+
+        // 2. Standard loadLibrary — works if LSPosed configures native lib dir correctly.
         try {
             System.loadLibrary("xposedlab");
             Logger.d("loadLibrary xposedlab OK (standard)");
             return;
-        } catch (UnsatisfiedLinkError ignored) {}
-
-        // 2. Derive the module's own APK path from MainHook's code source.
-        //    lpparam.classLoader is the TARGET APP's classloader (WhatsApp), not ours.
-        //    MainHook.class.getProtectionDomain().getCodeSource() gives PhantomMic's APK.
-        try {
-            java.security.CodeSource cs = MainHook.class.getProtectionDomain().getCodeSource();
-            if (cs != null) {
-                String apkPath = cs.getLocation().getPath(); // .../tn.amin.phantom_mic-.../base.apk
-                String dir = apkPath.substring(0, apkPath.lastIndexOf('/'));
-                for (String abi : new String[]{"arm64-v8a", "arm64", "armeabi-v7a"}) {
-                    File soFile = new File(dir + "/lib/" + abi + "/libxposedlab.so");
-                    Logger.d("Trying: " + soFile.getAbsolutePath() + " exists=" + soFile.exists());
-                    if (soFile.exists()) {
-                        System.load(soFile.getAbsolutePath());
-                        Logger.d("System.load xposedlab OK (" + abi + ")");
-                        return;
-                    }
-                }
-            }
-        } catch (UnsatisfiedLinkError | Exception e) {
-            Logger.d("CodeSource load failed: " + e.getMessage());
+        } catch (Throwable t) {
+            Logger.d("loadLibrary standard failed: " + t.getMessage());
         }
 
-        // 3. Last resort: scan /data/app/ for the module package directory.
+        // 3. Scan /data/app/ for the module package directory.
         try {
             File appDir = new File("/data/app/");
             File[] dirs1 = appDir.listFiles();
@@ -85,6 +82,7 @@ public class MainHook implements IXposedHookLoadPackage {
                         if (!d2.getName().startsWith("tn.amin.phantom_mic")) continue;
                         for (String abi : new String[]{"arm64-v8a", "arm64"}) {
                             File soFile = new File(d2, "lib/" + abi + "/libxposedlab.so");
+                            Logger.d("Scan trying: " + soFile + " exists=" + soFile.exists());
                             if (soFile.exists()) {
                                 System.load(soFile.getAbsolutePath());
                                 Logger.d("System.load xposedlab OK (scan: " + soFile + ")");
@@ -94,8 +92,8 @@ public class MainHook implements IXposedHookLoadPackage {
                     }
                 }
             }
-        } catch (UnsatisfiedLinkError | Exception e) {
-            Logger.d("Scan load failed: " + e.getMessage());
+        } catch (Throwable t) {
+            Logger.d("Scan load failed: " + t.getMessage());
         }
 
         Logger.d("ERROR: could not load libxposedlab.so from any path");
