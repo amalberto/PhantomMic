@@ -349,3 +349,16 @@ JNIEXPORT void JNICALL
 Java_tn_amin_phantom_1mic_audio_AudioMaster_onLoadDone(JNIEnv *env, jobject thiz) {
     g_phantomBridge->on_load_done();
 }
+
+// Java-side AudioRecord.read() hook calls this to fill a byte[] with injected PCM.
+// Returns true if data was injected, false if audio not ready (caller should pass through).
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_tn_amin_phantom_1mic_PhantomManager_overwriteBuffer(JNIEnv *env, jobject thiz,
+                                                          jbyteArray buffer, jint size) {
+    if (!g_phantomBridge) return JNI_FALSE;
+    jbyte* raw = env->GetByteArrayElements(buffer, nullptr);
+    bool result = g_phantomBridge->overwrite_buffer((char*) raw, (size_t) size);
+    env->ReleaseByteArrayElements(buffer, raw, result ? 0 : JNI_ABORT);
+    return result ? JNI_TRUE : JNI_FALSE;
+}

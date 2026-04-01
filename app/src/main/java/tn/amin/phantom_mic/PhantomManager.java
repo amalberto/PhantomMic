@@ -163,5 +163,12 @@ public class PhantomManager {
         Logger.d("(PhantomMic) *** INJECTING AUDIO count=" + count);
     }
 
+    /**
+     * Called from the Java-side AudioRecord.read() hook to fill a buffer with injected PCM.
+     * Returns true if data was injected (real read should be skipped),
+     * false if audio is not ready yet (real read should proceed normally).
+     */
+    public native boolean overwriteBuffer(byte[] buffer, int size);
+
     private native void nativeHook();
 }

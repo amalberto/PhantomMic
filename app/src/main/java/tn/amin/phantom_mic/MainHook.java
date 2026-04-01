@@ -106,6 +106,7 @@ public class MainHook implements IXposedHookLoadPackage {
             }
         });
 
+        hookAudioRecordRead(lpparam);
         hookActivityLifecycle(lpparam);
 
         XposedHelpers.findAndHookMethod("android.app.Instrumentation", lpparam.classLoader, "callApplicationOnCreate", Application.class, new XC_MethodHook() {
@@ -117,6 +118,91 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             }
         });
+    }
+
+    /**
+     * Hook all AudioRecord.read() overloads to inject PCM from our buffer.
+     * This replaces the native obtainBuffer_hook and works on all Android versions
+     * including Android 16 where native symbol hooks may fail in LSPosed context.
+     */
+    private void hookAudioRecordRead(XC_LoadPackage.LoadPackageParam lpparam) {
+        // Shared injection logic for byte[] variants
+        XC_MethodHook byteArrayHook = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                if (phantomManager == null) return;
+                byte[] audioData = (byte[]) param.args[0];
+                int sizeInBytes = (int) param.args[1];
+                if (sizeInBytes <= 0 || sizeInBytes > audioData.length) return;
+                byte[] tmp = new byte[sizeInBytes];
+                boolean injected = phantomManager.overwriteBuffer(tmp, sizeInBytes);
+                if (injected) {
+                    System.arraycopy(tmp, 0, audioData, 0, sizeInBytes);
+                    param.setResult(sizeInBytes);
+                    accBytes += sizeInBytes;
+                    if (accBytes <= sizeInBytes || accBytes % (16000 * 2) < sizeInBytes) {
+                        Logger.d("[read-hook] injected " + sizeInBytes + " bytes (total=" + accBytes + ")");
+                    }
+                }
+            }
+        };
+
+        // Shared injection logic for ByteBuffer variants
+        XC_MethodHook byteBufferHook = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                if (phantomManager == null) return;
+                ByteBuffer buf = (ByteBuffer) param.args[0];
+                int sizeInBytes = (int) param.args[1];
+                if (sizeInBytes <= 0 || buf.remaining() < sizeInBytes) return;
+                byte[] tmp = new byte[sizeInBytes];
+                boolean injected = phantomManager.overwriteBuffer(tmp, sizeInBytes);
+                if (injected) {
+                    buf.put(tmp, 0, sizeInBytes);
+                    param.setResult(sizeInBytes);
+                    accBytes += sizeInBytes;
+                    if (accBytes <= sizeInBytes || accBytes % (16000 * 2) < sizeInBytes) {
+                        Logger.d("[read-hook] injected " + sizeInBytes + " bytes BB (total=" + accBytes + ")");
+                    }
+                }
+            }
+        };
+
+        // read(byte[], int, int) — offsetInBytes, sizeInBytes
+        try {
+            XposedHelpers.findAndHookMethod("android.media.AudioRecord", lpparam.classLoader,
+                    "read", byte[].class, int.class, int.class, byteArrayHook);
+            Logger.d("Hooked AudioRecord#read(byte[],int,int)");
+        } catch (Throwable t) {
+            Logger.d("AudioRecord#read(byte[],int,int) not found: " + t.getMessage());
+        }
+
+        // read(byte[], int, int, int) — offsetInBytes, sizeInBytes, readMode
+        try {
+            XposedHelpers.findAndHookMethod("android.media.AudioRecord", lpparam.classLoader,
+                    "read", byte[].class, int.class, int.class, int.class, byteArrayHook);
+            Logger.d("Hooked AudioRecord#read(byte[],int,int,int)");
+        } catch (Throwable t) {
+            Logger.d("AudioRecord#read(byte[],int,int,int) not found: " + t.getMessage());
+        }
+
+        // read(ByteBuffer, int, int) — sizeInBytes, readMode
+        try {
+            XposedHelpers.findAndHookMethod("android.media.AudioRecord", lpparam.classLoader,
+                    "read", ByteBuffer.class, int.class, int.class, byteBufferHook);
+            Logger.d("Hooked AudioRecord#read(ByteBuffer,int,int)");
+        } catch (Throwable t) {
+            Logger.d("AudioRecord#read(ByteBuffer,int,int) not found: " + t.getMessage());
+        }
+
+        // read(ByteBuffer, int) — sizeInBytes (no readMode, older API)
+        try {
+            XposedHelpers.findAndHookMethod("android.media.AudioRecord", lpparam.classLoader,
+                    "read", ByteBuffer.class, int.class, byteBufferHook);
+            Logger.d("Hooked AudioRecord#read(ByteBuffer,int)");
+        } catch (Throwable t) {
+            Logger.d("AudioRecord#read(ByteBuffer,int) not found: " + t.getMessage());
+        }
     }
 
     /**
@@ -198,6 +284,7 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private boolean isSpecialCase() {
         return packageName.equals("com.whatsapp")
+                || packageName.equals("com.whatsapp.w4b")
                 || packageName.equals("com.android.soundrecorder");
     }
 
