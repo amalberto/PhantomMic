@@ -25,6 +25,11 @@ public class AudioMaster {
     private boolean mIsLoading = false;
     private Resampler mResampler = null;
 
+    // Source format stored at load() time so setFormat() can recreate the
+    // Resampler even if set_hook fires after decoding has already started.
+    private int mSrcSampleRate = 0;
+    private int mSrcChannelCount = 0;
+
     private final ExecutorService audioLoadExecutor = Executors.newSingleThreadExecutor();
 
     public void load(FileDescriptor fd) {
@@ -48,31 +53,20 @@ public class AudioMaster {
                 return;
             }
 
+            mSrcSampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+            mSrcChannelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+
             Logger.d("[AudioMaster] Source: mime=" + mimeType
-                    + " sampleRate=" + format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-                    + " channels=" + format.getInteger(MediaFormat.KEY_CHANNEL_COUNT));
+                    + " sampleRate=" + mSrcSampleRate
+                    + " channels=" + mSrcChannelCount);
+
             if (mOutFormat != null) {
                 Logger.d("[AudioMaster] Target: sampleRate=" + mOutFormat.getSampleRate()
                         + " channelCount=" + mOutFormat.getChannelCount()
                         + " encoding=" + mOutFormat.getEncoding());
-
-                // Create Resampler once for this file so state is preserved across chunks.
-                // Channel downmix (stereo→mono) is handled manually in processInBuffer
-                // BEFORE resampling, so the Resampler always sees the post-downmix channel
-                // count as input (avoids relying on SpeexDSP channel mixing).
-                int effectiveSrcChannels = Math.min(
-                        format.getInteger(MediaFormat.KEY_CHANNEL_COUNT),
-                        mOutFormat.getChannelCount());
-                ResamplerChannel inChannel = effectiveSrcChannels == 1
-                        ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
-                ResamplerChannel outChannel = mOutFormat.getChannelCount() == 1
-                        ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
-                mResampler = new Resampler(new ResamplerConfiguration(
-                        ResamplerQuality.BEST, inChannel,
-                        format.getInteger(MediaFormat.KEY_SAMPLE_RATE),
-                        outChannel, mOutFormat.getSampleRate()));
+                mResampler = buildResampler(mSrcSampleRate, mSrcChannelCount);
             } else {
-                Logger.d("[AudioMaster] Target format not yet set — will be skipped until set");
+                Logger.d("[AudioMaster] Target format not yet known — Resampler will be created when set_hook fires");
             }
 
             MediaCodec codec = MediaCodec.createDecoderByType(mimeType);
@@ -133,20 +127,11 @@ public class AudioMaster {
                 codec.releaseOutputBuffer(outputBufferIndex, false);
             } else if (outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 format = codec.getOutputFormat();
-                Logger.d("Format changed to " + format);
-                // Recreate resampler with updated source format to avoid pitch/speed drift
+                mSrcSampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+                mSrcChannelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+                Logger.d("[AudioMaster] Format changed → sampleRate=" + mSrcSampleRate + " channels=" + mSrcChannelCount);
                 if (mOutFormat != null) {
-                    int effectiveSrcCh = Math.min(
-                            format.getInteger(MediaFormat.KEY_CHANNEL_COUNT),
-                            mOutFormat.getChannelCount());
-                    ResamplerChannel inChannel = effectiveSrcCh == 1
-                            ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
-                    ResamplerChannel outChannel = mOutFormat.getChannelCount() == 1
-                            ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
-                    mResampler = new Resampler(new ResamplerConfiguration(
-                            ResamplerQuality.BEST, inChannel,
-                            format.getInteger(MediaFormat.KEY_SAMPLE_RATE),
-                            outChannel, mOutFormat.getSampleRate()));
+                    mResampler = buildResampler(mSrcSampleRate, mSrcChannelCount);
                 }
             }
 
@@ -159,7 +144,8 @@ public class AudioMaster {
         codec.stop();
         codec.release();
         extractor.release();
-        mOutFormat = null;
+        // Do NOT clear mOutFormat — it is needed so that a subsequent recording
+        // session (set_hook fires again) can recreate the Resampler immediately.
         mResampler = null;
 
         Logger.d("[AudioMaster] Loading done — raw PCM decoded: " + totalPcmBytes + " bytes");
@@ -172,9 +158,18 @@ public class AudioMaster {
             return;
         }
 
-        // Guard: if no output format has been set yet, skip silently.
-        if (mOutFormat == null || mResampler == null) {
-            Logger.d("processInBuffer skipped: output format or resampler not yet set");
+        // Guard: if output format is not yet known, skip silently.
+        if (mOutFormat == null) {
+            return;
+        }
+        // Lazy Resampler creation: handles the case where set_hook fires after
+        // load() has already started (the common case on Android 12+/WhatsApp).
+        if (mResampler == null && mSrcSampleRate > 0) {
+            Logger.d("[AudioMaster] Lazy Resampler creation: src=" + mSrcSampleRate
+                    + "Hz dst=" + mOutFormat.getSampleRate() + "Hz");
+            mResampler = buildResampler(mSrcSampleRate, mSrcChannelCount);
+        }
+        if (mResampler == null) {
             return;
         }
 
@@ -217,6 +212,7 @@ public class AudioMaster {
 
     public void setFormat(AudioFormat format) {
         mOutFormat = format;
+        recreateResamplerIfReady();
     }
 
     public void setFormat(int sampleRate, int channelMask, int encoding) {
@@ -224,8 +220,36 @@ public class AudioMaster {
                 .setSampleRate(sampleRate)
                 .setChannelMask(channelMask)
                 .setEncoding(encoding)
-                .setSampleRate(sampleRate)
                 .build();
+        recreateResamplerIfReady();
+    }
+
+    /**
+     * Called every time the target format (from set_hook) is updated.
+     * If source info is already known, the Resampler is recreated immediately
+     * so that any chunks still being decoded use the correct conversion.
+     */
+    private void recreateResamplerIfReady() {
+        if (mSrcSampleRate > 0 && mOutFormat != null) {
+            Logger.d("[AudioMaster] setFormat → recreating Resampler: src=" + mSrcSampleRate
+                    + "Hz/" + mSrcChannelCount + "ch → dst=" + mOutFormat.getSampleRate()
+                    + "Hz/" + mOutFormat.getChannelCount() + "ch");
+            mResampler = buildResampler(mSrcSampleRate, mSrcChannelCount);
+        }
+    }
+
+    private Resampler buildResampler(int srcSampleRate, int srcChannelCount) {
+        if (mOutFormat == null) return null;
+        // Channel downmix (stereo→mono) is done manually BEFORE calling the Resampler,
+        // so the Resampler always receives post-downmix (at most mono) input.
+        int effectiveSrcCh = (srcChannelCount >= 2 && mOutFormat.getChannelCount() == 1) ? 1 : srcChannelCount;
+        ResamplerChannel inChannel  = effectiveSrcCh  == 1 ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
+        ResamplerChannel outChannel = mOutFormat.getChannelCount() == 1 ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
+        Logger.d("[AudioMaster] buildResampler: " + srcSampleRate + "Hz " + inChannel
+                + " → " + mOutFormat.getSampleRate() + "Hz " + outChannel);
+        return new Resampler(new ResamplerConfiguration(
+                ResamplerQuality.BEST, inChannel, srcSampleRate,
+                outChannel, mOutFormat.getSampleRate()));
     }
 
     public AudioFormat getFormat() {
