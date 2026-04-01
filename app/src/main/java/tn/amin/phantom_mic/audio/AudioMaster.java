@@ -91,6 +91,9 @@ public class AudioMaster {
 
     public void unload() {
         mIsLoading = false;
+        // Unlock the format so the next recording session accepts a fresh
+        // set_hook value (in case WhatsApp changes sample rate between sessions).
+        mOutFormat = null;
         try {
             //noinspection ResultOfMethodCallIgnored
             audioLoadExecutor.awaitTermination(500, TimeUnit.MILLISECONDS);
@@ -237,12 +240,21 @@ public class AudioMaster {
     }
 
     public void setFormat(int sampleRate, int channelMask, int encoding) {
+        if (mOutFormat != null) {
+            // Lock: already set by the first AudioRecord (voice recording channel).
+            // WhatsApp Business creates a second AudioRecord at 44100Hz (AEC/echo
+            // cancellation) right after — ignore it to avoid corrupting the pipeline.
+            Logger.d("[AudioMaster] setFormat ignored (locked to "
+                    + mOutFormat.getSampleRate() + "Hz) — rejected: " + sampleRate + "Hz");
+            return;
+        }
         mOutFormat = new AudioFormat.Builder()
                 .setSampleRate(sampleRate)
                 .setChannelMask(channelMask)
                 .setEncoding(encoding)
                 .build();
         mLastKnownOutFormat = mOutFormat;
+        Logger.d("[AudioMaster] setFormat locked to " + sampleRate + "Hz");
         recreateResamplerIfReady();
     }
 
