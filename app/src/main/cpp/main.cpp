@@ -39,12 +39,23 @@ int need_log = 5;
 size_t acc_frame_count = 0;
 int acc_offset = 0;
 
+// The AudioRecord instance we want to inject into (VOICE_COMMUNICATION, 16000Hz).
+// Only set when ctor_hook/set_hook sees inputSource==7 or sampleRate==16000.
+// obtainBuffer_hook skips all other AudioRecord instances (e.g. AEC at 44100Hz)
+// so the buffer is not consumed 2-3x faster than real-time.
+void* g_target_ar = nullptr;
+
 int32_t (*obtainBuffer_backup)(void*, void*, void*, void*, void*);
 int32_t  obtainBuffer_hook(void* v0, void* v1, void* v2, void* v3, void* v4) {
     int32_t status = obtainBuffer_backup(v0, v1, v2, v3, v4);
+
+    // Skip injection for secondary AudioRecords (AEC, noise cancellation, etc.)
+    if (g_target_ar != nullptr && v0 != g_target_ar) {
+        return status;
+    }
+
     size_t frameCount = * (size_t*) v1;
     size_t size = * (size_t*) ((uintptr_t) v1 + sizeof(size_t));
-    size_t frameSize = size / frameCount;
     char* raw = * (char**) ((uintptr_t) v1 + sizeof(size_t) * 2);
 
     bool injected = g_phantomBridge->overwrite_buffer(raw, size);
@@ -63,7 +74,8 @@ int32_t  obtainBuffer_hook(void* v0, void* v1, void* v2, void* v3, void* v4) {
     }
     if (need_log > 0) {
         need_log--;
-        LOGI("[%zu] Inside obtainBuffer size=%zu injected=%d", acc_frame_count, size, injected ? 1 : 0);
+        LOGI("[%zu] Inside obtainBuffer size=%zu injected=%d ar=%p target=%p",
+             acc_frame_count, size, injected ? 1 : 0, v0, g_target_ar);
     }
 
     acc_frame_count += frameCount;
@@ -75,9 +87,16 @@ void (*stop_backup)(void*);
 void  stop_hook(void* thiz) {
     stop_backup(thiz);
 
+    if (thiz != g_target_ar) {
+        LOGI("[stop_hook] Ignoring stop for non-target ar=%p", thiz);
+        return;
+    }
+
+    LOGI("[stop_hook] Stopping target ar=%p", thiz);
+    g_target_ar = nullptr;  // reset so next recording can pick a new target
+
     JNIEnv* env;
     JVM->AttachCurrentThread(&env, nullptr);
-    LOGI("AudioRecord::stop()");
     g_phantomBridge->unload(env);
 }
 
@@ -87,13 +106,26 @@ static constexpr int32_t AUDIO_SOURCE_MIC                 = 1;
 static constexpr int32_t AUDIO_SOURCE_VOICE_COMMUNICATION = 7;
 
 // Shared post-call logic extracted to avoid duplication between hook variants.
-static void set_hook_post(JNIEnv** envOut, uint32_t sampleRate, uint32_t format,
-                          uint32_t channelMask) {
-    JNIEnv* env;
-    JVM->AttachCurrentThread(&env, nullptr);
-    g_phantomBridge->update_audio_format(env, sampleRate, format, channelMask);
-    g_phantomBridge->load(env);
-    if (envOut) *envOut = env;
+static void set_hook_post(JNIEnv** envOut, void* thiz, int32_t inputSource,
+                          uint32_t sampleRate, uint32_t format, uint32_t channelMask) {
+    // Only treat VOICE_COMMUNICATION (7) or MIC (1) as the injection target.
+    // Ignore AEC / CAMCORDER / etc.
+    bool isVoice = (inputSource == AUDIO_SOURCE_VOICE_COMMUNICATION ||
+                    inputSource == AUDIO_SOURCE_MIC ||
+                    inputSource == AUDIO_SOURCE_DEFAULT);
+    if (isVoice && g_target_ar == nullptr) {
+        g_target_ar = thiz;
+        LOGI("[set_hook_post] Locked injection target ar=%p inputSource=%d sampleRate=%u",
+             thiz, inputSource, sampleRate);
+        JNIEnv* env;
+        JVM->AttachCurrentThread(&env, nullptr);
+        g_phantomBridge->update_audio_format(env, sampleRate, format, channelMask);
+        g_phantomBridge->load(env);
+        if (envOut) *envOut = env;
+    } else {
+        LOGI("[set_hook_post] Skipping non-voice ar=%p inputSource=%d sampleRate=%u",
+             thiz, inputSource, sampleRate);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -137,7 +169,7 @@ int32_t set_hook_modern(void* thiz, int32_t inputSource, uint32_t sampleRate,
         }
     }
 
-    set_hook_post(nullptr, sampleRate, format, channelMask);
+    set_hook_post(nullptr, thiz, inputSource, sampleRate, format, channelMask);
     return result;
 }
 
@@ -181,7 +213,7 @@ int32_t set_hook_legacy(void* thiz, int32_t inputSource, uint32_t sampleRate,
         }
     }
 
-    set_hook_post(nullptr, sampleRate, format, channelMask);
+    set_hook_post(nullptr, thiz, inputSource, sampleRate, format, channelMask);
     return result;
 }
 
@@ -207,11 +239,8 @@ void  ctor_hook(void* thiz, int32_t inputSource, uint32_t sampleRate,
     ctor_backup(thiz, inputSource, sampleRate, format, channelMask,
                 attributionSource, frameCount, cbf, notificationFrames,
                 sessionId, transferType, flags, pAttributes, micDir, micFieldDimension);
-    LOGI("[ctor_hook] POST — calling update_audio_format");
-    JNIEnv* env;
-    JVM->AttachCurrentThread(&env, nullptr);
-    g_phantomBridge->update_audio_format(env, (int)sampleRate, (int)format, (int)channelMask);
-    g_phantomBridge->load(env);
+    LOGI("[ctor_hook] POST — calling set_hook_post");
+    set_hook_post(nullptr, thiz, inputSource, sampleRate, format, channelMask);
 }
 
 // AudioRecord::start(AudioSystem::sync_event_t, audio_session_t)
