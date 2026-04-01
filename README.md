@@ -16,7 +16,7 @@ https://github.com/user-attachments/assets/12a9d229-fd8a-4370-b969-1a342360abdf
 | Facebook Messenger | ✔ Working |
 | Discord            | ✔ Working |
 | Telegram           | ✔ Working |
-| Whatsapp **        | ✔ Working |
+| Whatsapp **        | ✔ Working (including Android 16) |
 | Google Chrome      | ✔ Working |
 | IMO                | ✔ Working |
 | .. You tell me!    |           |
