@@ -10,6 +10,7 @@
 #include <fstream>
 #include <thread>
 #include <codecvt>
+#include <android/api-level.h>
 
 #include "logging.h"
 #include "native_api.h"
@@ -73,63 +74,104 @@ void  stop_hook(void* thiz) {
 // AUDIO_SOURCE_* constants (keep in sync with AudioSource.aidl)
 static constexpr int32_t AUDIO_SOURCE_DEFAULT             = 0;
 static constexpr int32_t AUDIO_SOURCE_MIC                 = 1;
-static constexpr int32_t AUDIO_SOURCE_VOICE_UPLINK        = 2;
-static constexpr int32_t AUDIO_SOURCE_VOICE_DOWNLINK      = 3;
-static constexpr int32_t AUDIO_SOURCE_VOICE_CALL          = 4;
 static constexpr int32_t AUDIO_SOURCE_VOICE_COMMUNICATION = 7;
 
-int32_t (*set_backup)(void* thiz, int32_t inputSource, uint32_t sampleRate, uint32_t format,
-                      uint32_t channelMask, size_t frameCount, void* callback_ptr, void* callback_refs,
-                      uint32_t notificationFrames, bool threadCanCallJava, int32_t sessionId,
-                      int transferType, uint32_t flags, uint32_t uid, int32_t pid, void* pAttributes,
-                      int selectedDeviceId, int selectedMicDirection, float microphoneFieldDimension,
-                      int32_t maxSharedAudioHistoryMs);
-int32_t set_hook(void* thiz, int32_t inputSource, uint32_t sampleRate, uint32_t format,
-                 uint32_t channelMask, size_t frameCount, void* callback_ptr, void* callback_refs,
-                 uint32_t notificationFrames, bool threadCanCallJava, int32_t sessionId,
-                 int transferType, uint32_t flags, uint32_t uid, int32_t pid, void* pAttributes,
-                 int selectedDeviceId, int selectedMicDirection, float microphoneFieldDimension,
-                 int32_t maxSharedAudioHistoryMs) {
+// Shared post-call logic extracted to avoid duplication between hook variants.
+static void set_hook_post(JNIEnv** envOut, uint32_t sampleRate, uint32_t format,
+                          uint32_t channelMask) {
+    JNIEnv* env;
+    JVM->AttachCurrentThread(&env, nullptr);
+    g_phantomBridge->update_audio_format(env, sampleRate, format, channelMask);
+    g_phantomBridge->load(env);
+    if (envOut) *envOut = env;
+}
 
-    LOGI("[set_hook] PRE  inputSource=%d sampleRate=%u format=0x%x channelMask=0x%x frameCount=%zu",
-         inputSource, sampleRate, format, channelMask, frameCount);
+// ─────────────────────────────────────────────────────────────────────────────
+// MODERN hook — Android 13+ (API 33+)
+//   AudioRecord::set() replaced callback_t+void* with wp<IAudioRecordCallback> const&
+//   No void* user parameter. Added int32_t maxSharedAudioHistoryMs at the end.
+// ─────────────────────────────────────────────────────────────────────────────
+int32_t (*set_backup_modern)(void*, int32_t, uint32_t, uint32_t, uint32_t, size_t,
+                              void*, uint32_t, bool, int32_t, int, uint32_t, uint32_t, int32_t,
+                              void*, int, int, float, int32_t);
+int32_t set_hook_modern(void* thiz, int32_t inputSource, uint32_t sampleRate,
+                         uint32_t format, uint32_t channelMask, size_t frameCount,
+                         void* cbf,         // wp<IAudioRecordCallback> const& → single pointer
+                         uint32_t notificationFrames, bool threadCanCallJava, int32_t sessionId,
+                         int transferType, uint32_t flags, uint32_t uid, int32_t pid,
+                         void* pAttributes, int selectedMicDir, int microphoneDirection,
+                         float microphoneFieldDimension, int32_t maxSharedAudioHistoryMs) {
+    LOGI("[set_hook] PRE  api=modern inputSource=%d sampleRate=%u format=0x%x channelMask=0x%x",
+         inputSource, sampleRate, format, channelMask);
 
-    int32_t result = set_backup(thiz, inputSource, sampleRate, format, channelMask, frameCount,
-                                callback_ptr, callback_refs, notificationFrames, threadCanCallJava,
-                                sessionId, transferType, flags, uid, pid, pAttributes,
-                                selectedDeviceId, selectedMicDirection, microphoneFieldDimension,
-                                maxSharedAudioHistoryMs);
+    int32_t result = set_backup_modern(thiz, inputSource, sampleRate, format, channelMask,
+                                       frameCount, cbf, notificationFrames, threadCanCallJava,
+                                       sessionId, transferType, flags, uid, pid, pAttributes,
+                                       selectedMicDir, microphoneDirection,
+                                       microphoneFieldDimension, maxSharedAudioHistoryMs);
+    LOGI("[set_hook] POST result=%d sampleRate=%u format=0x%x channelMask=0x%x",
+         result, sampleRate, format, channelMask);
 
-    LOGI("[set_hook] POST result=%d inputSource=%d sampleRate=%u format=0x%x channelMask=0x%x",
-         result, inputSource, sampleRate, format, channelMask);
-
-    // Permissive fallback: if the original inputSource fails, retry with progressively
-    // simpler sources. On Android 12+ AudioFlinger can reject VOICE_COMMUNICATION or
-    // VOICE_UPLINK/DOWNLINK when the audio policy denies capture for that source type.
     if (result != 0 && inputSource != AUDIO_SOURCE_DEFAULT) {
-        static const int32_t fallback_sources[] = {
-            AUDIO_SOURCE_MIC,
-            AUDIO_SOURCE_DEFAULT
-        };
-        for (int32_t fb : fallback_sources) {
+        static const int32_t fallbacks[] = { AUDIO_SOURCE_MIC, AUDIO_SOURCE_DEFAULT };
+        for (int32_t fb : fallbacks) {
             if (fb == inputSource) continue;
-            LOGI("[set_hook] Retrying with inputSource=%d (was %d, result=%d)",
-                 fb, inputSource, result);
-            result = set_backup(thiz, fb, sampleRate, format, channelMask, frameCount,
-                                callback_ptr, callback_refs, notificationFrames, threadCanCallJava,
-                                sessionId, transferType, flags, uid, pid, pAttributes,
-                                selectedDeviceId, selectedMicDirection, microphoneFieldDimension,
-                                maxSharedAudioHistoryMs);
+            LOGI("[set_hook] Retrying inputSource=%d (was %d)", fb, inputSource);
+            result = set_backup_modern(thiz, fb, sampleRate, format, channelMask, frameCount,
+                                       cbf, notificationFrames, threadCanCallJava, sessionId,
+                                       transferType, flags, uid, pid, pAttributes,
+                                       selectedMicDir, microphoneDirection,
+                                       microphoneFieldDimension, maxSharedAudioHistoryMs);
             LOGI("[set_hook] Fallback inputSource=%d result=%d", fb, result);
             if (result == 0) break;
         }
     }
 
-    JNIEnv* env;
-    JVM->AttachCurrentThread(&env, nullptr);
-    g_phantomBridge->update_audio_format(env, sampleRate, format, channelMask);
-    g_phantomBridge->load(env);
+    set_hook_post(nullptr, sampleRate, format, channelMask);
+    return result;
+}
 
+// ─────────────────────────────────────────────────────────────────────────────
+// LEGACY hook — Android 7–12L (API 24–32)
+//   AudioRecord::set() had callback_t cbf + void* user as two separate params.
+//   No maxSharedAudioHistoryMs.
+// ─────────────────────────────────────────────────────────────────────────────
+int32_t (*set_backup_legacy)(void*, int32_t, uint32_t, uint32_t, uint32_t, size_t,
+                              void*, void*, uint32_t, bool, int32_t, int, uint32_t, uint32_t, int32_t,
+                              void*, int, float);
+int32_t set_hook_legacy(void* thiz, int32_t inputSource, uint32_t sampleRate,
+                         uint32_t format, uint32_t channelMask, size_t frameCount,
+                         void* cbf, void* user,
+                         uint32_t notificationFrames, bool threadCanCallJava, int32_t sessionId,
+                         int transferType, uint32_t flags, uint32_t uid, int32_t pid,
+                         void* pAttributes, int selectedMicDirection,
+                         float microphoneFieldDimension) {
+    LOGI("[set_hook] PRE  api=legacy inputSource=%d sampleRate=%u format=0x%x channelMask=0x%x",
+         inputSource, sampleRate, format, channelMask);
+
+    int32_t result = set_backup_legacy(thiz, inputSource, sampleRate, format, channelMask,
+                                       frameCount, cbf, user, notificationFrames,
+                                       threadCanCallJava, sessionId, transferType, flags,
+                                       uid, pid, pAttributes, selectedMicDirection,
+                                       microphoneFieldDimension);
+    LOGI("[set_hook] POST result=%d sampleRate=%u format=0x%x channelMask=0x%x",
+         result, sampleRate, format, channelMask);
+
+    if (result != 0 && inputSource != AUDIO_SOURCE_DEFAULT) {
+        static const int32_t fallbacks[] = { AUDIO_SOURCE_MIC, AUDIO_SOURCE_DEFAULT };
+        for (int32_t fb : fallbacks) {
+            if (fb == inputSource) continue;
+            LOGI("[set_hook] Retrying inputSource=%d (was %d)", fb, inputSource);
+            result = set_backup_legacy(thiz, fb, sampleRate, format, channelMask, frameCount,
+                                       cbf, user, notificationFrames, threadCanCallJava,
+                                       sessionId, transferType, flags, uid, pid, pAttributes,
+                                       selectedMicDirection, microphoneFieldDimension);
+            LOGI("[set_hook] Fallback inputSource=%d result=%d", fb, result);
+            if (result == 0) break;
+        }
+    }
+
+    set_hook_post(nullptr, sampleRate, format, channelMask);
     return result;
 }
 
@@ -207,8 +249,16 @@ Java_tn_amin_phantom_1mic_PhantomManager_nativeHook(JNIEnv *env, jobject thiz) {
     }
 
     if (set_symbol != 0) {
-        hook_func((void*) set_symbol, (void*) set_hook, (void**) &set_backup);
-        LOGI("Hooked AudioRecord::set");
+        int api = android_get_device_api_level();
+        if (api >= 33) {
+            // Android 13+ (API 33+): wp<IAudioRecordCallback> const& — no void* user
+            hook_func((void*) set_symbol, (void*) set_hook_modern, (void**) &set_backup_modern);
+            LOGI("Hooked AudioRecord::set (modern, api=%d)", api);
+        } else {
+            // Android 7–12L (API 24–32): callback_t + void* user
+            hook_func((void*) set_symbol, (void*) set_hook_legacy, (void**) &set_backup_legacy);
+            LOGI("Hooked AudioRecord::set (legacy, api=%d)", api);
+        }
     } else {
         LOGE("AudioRecord::set symbol not found — format detection unavailable, using PCM default");
         // Trigger load now with the pre-initialised PCM default format
