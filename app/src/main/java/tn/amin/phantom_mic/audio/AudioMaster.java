@@ -22,6 +22,9 @@ public class AudioMaster {
     private static final int TIMEOUT_MS = 1000;
 
     private AudioFormat mOutFormat;
+    // Cached copy of the last known output format — survives between recordings
+    // in case WhatsApp reuses the AudioRecord object (set_hook doesn't fire again).
+    private AudioFormat mLastKnownOutFormat = null;
     private boolean mIsLoading = false;
     private Resampler mResampler = null;
 
@@ -60,13 +63,20 @@ public class AudioMaster {
                     + " sampleRate=" + mSrcSampleRate
                     + " channels=" + mSrcChannelCount);
 
+            // If set_hook hasn't fired yet, fall back to the last known format
+            // (WhatsApp often reuses the AudioRecord object between recordings).
+            if (mOutFormat == null && mLastKnownOutFormat != null) {
+                mOutFormat = mLastKnownOutFormat;
+                Logger.d("[AudioMaster] Reusing cached format: " + mOutFormat.getSampleRate() + "Hz");
+            }
+
             if (mOutFormat != null) {
                 Logger.d("[AudioMaster] Target: sampleRate=" + mOutFormat.getSampleRate()
                         + " channelCount=" + mOutFormat.getChannelCount()
                         + " encoding=" + mOutFormat.getEncoding());
                 mResampler = buildResampler(mSrcSampleRate, mSrcChannelCount);
             } else {
-                Logger.d("[AudioMaster] Target format not yet known — Resampler will be created when set_hook fires");
+                Logger.d("[AudioMaster] Target format not yet known — waiting for set_hook");
             }
 
             MediaCodec codec = MediaCodec.createDecoderByType(mimeType);
@@ -158,9 +168,20 @@ public class AudioMaster {
             return;
         }
 
-        // Guard: if output format is not yet known, skip silently.
+        // If output format is not yet known, spin-wait up to 300 ms for set_hook
+        // to fire before discarding the chunk entirely.
         if (mOutFormat == null) {
-            return;
+            long deadline = System.currentTimeMillis() + 300;
+            while (mOutFormat == null && System.currentTimeMillis() < deadline) {
+                try { Thread.sleep(10); } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+            if (mOutFormat == null) {
+                Logger.d("[AudioMaster] processInBuffer: format still null after 300ms, discarding chunk");
+                return;
+            }
         }
         // Lazy Resampler creation: handles the case where set_hook fires after
         // load() has already started (the common case on Android 12+/WhatsApp).
@@ -221,6 +242,7 @@ public class AudioMaster {
                 .setChannelMask(channelMask)
                 .setEncoding(encoding)
                 .build();
+        mLastKnownOutFormat = mOutFormat;
         recreateResamplerIfReady();
     }
 

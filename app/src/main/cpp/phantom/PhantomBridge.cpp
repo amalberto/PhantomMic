@@ -33,11 +33,23 @@ int audioFormatToJava(int audioFormat) {
 
 
 void PhantomBridge::update_audio_format(JNIEnv* env, int sampleRate, int audioFormat, int channelMask) {
+    // Any PCM already in the buffer was resampled at the OLD rate.
+    // Discard it now so we only serve data resampled at the correct rate.
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_buffer_write_position > 0) {
+            LOGI("[PhantomBridge] format change — discarding %zu wrong-rate bytes", m_buffer_write_position);
+            m_buffer_write_position = 0;
+            m_buffer_read_position  = 0;
+            m_buffer_loaded         = false;
+        }
+    }
+
+    mAudioFormat = audioFormat;
+
     jclass j_phantomManagerClass = env->GetObjectClass(j_phantomManager);
     jmethodID method = env->GetMethodID(j_phantomManagerClass, "updateAudioFormat", "(III)V");
     env->CallVoidMethod(j_phantomManager, method, sampleRate, channelMask, audioFormatToJava(audioFormat));
-
-    mAudioFormat = audioFormat;
 }
 
 void PhantomBridge::load(JNIEnv *env) {
