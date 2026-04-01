@@ -83,13 +83,17 @@ int32_t set_hook(void* thiz, int32_t inputSource, uint32_t sampleRate, uint32_t 
                  int selectedDeviceId, int selectedMicDirection, float microphoneFieldDimension,
                  int32_t maxSharedAudioHistoryMs) {
 
+    LOGI("[set_hook] PRE  sampleRate=%u format=0x%x channelMask=0x%x frameCount=%zu",
+         sampleRate, format, channelMask, frameCount);
+
     int32_t result = set_backup(thiz, inputSource, sampleRate, format, channelMask, frameCount,
                                 callback_ptr, callback_refs, notificationFrames, threadCanCallJava,
                                 sessionId, transferType, flags, uid, pid, pAttributes,
                                 selectedDeviceId, selectedMicDirection, microphoneFieldDimension,
                                 maxSharedAudioHistoryMs);
 
-    LOGI("AudioRecord::set(...): %d", result);
+    LOGI("[set_hook] POST result=%d sampleRate=%u format=0x%x channelMask=0x%x",
+         result, sampleRate, format, channelMask);
 
     JNIEnv* env;
     JVM->AttachCurrentThread(&env, nullptr);
@@ -130,18 +134,39 @@ Java_tn_amin_phantom_1mic_PhantomManager_nativeHook(JNIEnv *env, jobject thiz) {
 
     LOGI("Doing c++ hook");
 
-    ElfScanner g_libTargetELF = ElfScanner::createWithPath(HookCompat::get_library_name());
+    std::string libName = HookCompat::get_library_name();
+    LOGI("Target library: %s", libName.c_str());
+    ElfScanner g_libTargetELF = ElfScanner::createWithPath(libName);
 
     uintptr_t set_symbol = HookCompat::get_set_symbol(g_libTargetELF);
     LOGI("AudioRecord::set at %p", (void*) set_symbol);
     uintptr_t obtainBuffer_symbol = HookCompat::get_obtainBuffer_symbol(g_libTargetELF);
     LOGI("AudioRecord::obtainBuffer at %p", (void*) obtainBuffer_symbol);
     uintptr_t stop_symbol = HookCompat::get_stop_symbol(g_libTargetELF);
-    LOGI("AudioRecord::stop at %p", (void*) obtainBuffer_symbol);
+    LOGI("AudioRecord::stop at %p", (void*) stop_symbol);
 
-    hook_func((void*) obtainBuffer_symbol, (void*) obtainBuffer_hook, (void**) &obtainBuffer_backup);
-    hook_func((void*) stop_symbol, (void*) stop_hook, (void**) &stop_backup);
-    hook_func((void*) set_symbol, (void*) set_hook, (void**) &set_backup);
+    if (obtainBuffer_symbol != 0) {
+        hook_func((void*) obtainBuffer_symbol, (void*) obtainBuffer_hook, (void**) &obtainBuffer_backup);
+        LOGI("Hooked AudioRecord::obtainBuffer");
+    } else {
+        LOGE("AudioRecord::obtainBuffer symbol not found — audio injection will not work");
+    }
+
+    if (stop_symbol != 0) {
+        hook_func((void*) stop_symbol, (void*) stop_hook, (void**) &stop_backup);
+        LOGI("Hooked AudioRecord::stop");
+    } else {
+        LOGE("AudioRecord::stop symbol not found — resources will not be released on stop");
+    }
+
+    if (set_symbol != 0) {
+        hook_func((void*) set_symbol, (void*) set_hook, (void**) &set_backup);
+        LOGI("Hooked AudioRecord::set");
+    } else {
+        LOGE("AudioRecord::set symbol not found — format detection unavailable, using PCM default");
+        // Trigger load now with the pre-initialised PCM default format
+        g_phantomBridge->load(env);
+    }
 }
 
 extern "C"

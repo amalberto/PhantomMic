@@ -47,6 +47,17 @@ public class AudioMaster {
                 return;
             }
 
+            Logger.d("[AudioMaster] Source: mime=" + mimeType
+                    + " sampleRate=" + format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                    + " channels=" + format.getInteger(MediaFormat.KEY_CHANNEL_COUNT));
+            if (mOutFormat != null) {
+                Logger.d("[AudioMaster] Target: sampleRate=" + mOutFormat.getSampleRate()
+                        + " channelCount=" + mOutFormat.getChannelCount()
+                        + " encoding=" + mOutFormat.getEncoding());
+            } else {
+                Logger.d("[AudioMaster] Target format not yet set — will be skipped until set");
+            }
+
             MediaCodec codec = MediaCodec.createDecoderByType(mimeType);
             codec.configure(format, null, null, 0);
             codec.start();
@@ -70,6 +81,7 @@ public class AudioMaster {
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
 
         boolean isEOS = false;
+        long totalPcmBytes = 0;
         do {
             if (!isEOS) {
                 int inputBufferIndex = codec.dequeueInputBuffer(TIMEOUT_MS);
@@ -96,6 +108,7 @@ public class AudioMaster {
                     byte[] pcmData = new byte[bufferInfo.size];
                     outputBuffer.get(pcmData);
                     outputBuffer.clear();
+                    totalPcmBytes += pcmData.length;
 
                     // Resample and store PCM data
                     processInBuffer(format, pcmData);
@@ -118,13 +131,20 @@ public class AudioMaster {
         extractor.release();
         mOutFormat = null;
 
-        Logger.d("Loading done");
+        Logger.d("[AudioMaster] Loading done — raw PCM decoded: " + totalPcmBytes + " bytes");
         mIsLoading = false;
         onLoadDone();
     }
 
     private void processInBuffer(MediaFormat source, byte[] bufferChunk) {
         if (bufferChunk.length == 0) {
+            return;
+        }
+
+        // Guard: if no output format has been set yet, skip silently.
+        // This can happen in a tight race before AudioRecord::set() fires.
+        if (mOutFormat == null) {
+            Logger.d("processInBuffer skipped: output format not yet set");
             return;
         }
 

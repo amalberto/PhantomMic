@@ -100,12 +100,17 @@ public class FileManager {
         // Create a DocumentFile from the tree URI
         DocumentFile directory = DocumentFile.fromTreeUri(mContext.get(), uri);
 
+        // Strip extension from the requested name so both "song" and "song.mp3" match "song.mp3"
+        String requestedBase = fileName.replaceFirst("[.][^.]+$", "");
+
         if (directory != null && directory.isDirectory()) {
             for (DocumentFile file : directory.listFiles()) {
-                if (file.isFile() && file.getName() != null && file.getName().startsWith(fileName)
-                        && file.getType() != null && file.getType().startsWith("audio/")) {
-                    Logger.d("Loading file " + file.getName());
+                if (!file.isFile() || file.getName() == null) continue;
+                if (file.getType() == null || !file.getType().startsWith("audio/")) continue;
 
+                String diskBase = file.getName().replaceFirst("[.][^.]+$", "");
+                if (diskBase.equals(requestedBase) || file.getName().equals(fileName)) {
+                    Logger.d("Loading file " + file.getName());
                     return file.getUri();
                 }
             }

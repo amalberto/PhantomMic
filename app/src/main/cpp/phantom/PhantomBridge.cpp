@@ -24,7 +24,10 @@ int audioFormatToJava(int audioFormat) {
         case 0x6u:
             return ENCODING_PCM_24BIT_PACKED;
         default:
-            return ENCODING_PCM_8BIT;
+            // Unknown/unreported format: fall back to PCM_16BIT to avoid
+            // initialisation errors (same strategy as WhatsMicFix permissive mode)
+            LOGW("Unknown audio format 0x%x — defaulting to PCM_16BIT", audioFormat);
+            return ENCODING_PCM_16BIT;
     }
 }
 
