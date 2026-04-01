@@ -265,24 +265,47 @@ Java_tn_amin_phantom_1mic_PhantomManager_nativeHook(JNIEnv *env, jobject thiz) {
     std::string libName = HookCompat::get_library_name();
     LOGI("Target library: %s", libName.c_str());
 
-    // Force-load the target library into the process before any symbol lookup.
-    // nativeHook() runs at Application.onCreate() — before WhatsApp creates its
-    // first AudioRecord — so libaudioclient.so is NOT yet in /proc/self/maps.
-    // ElfScanner::createWithPath() would return an invalid scanner (base=0) and
-    // all findSymbol() calls would return 0. Using dlopen() ensures the library
-    // is resident in memory so both dlsym() and ElfScanner work correctly.
-    void* libHandle = dlopen(libName.c_str(), RTLD_NOW | RTLD_GLOBAL);
-    if (!libHandle) {
-        LOGE("dlopen(%s) failed: %s", libName.c_str(), dlerror());
+    // Strategy: ElfScanner reads /proc/self/maps and finds the address of the
+    // library copy that is ALREADY mapped in the process (WhatsApp's own copy).
+    // Hooking that address patches the right code path.
+    //
+    // dlopen(RTLD_NOW | RTLD_GLOBAL) must NOT be used — on Android 14+ with
+    // linker namespaces it can create a SECOND copy of the library in a different
+    // namespace, giving addresses that WhatsApp never calls.
+    //
+    // If ElfScanner returns 0 (library not yet in /proc/self/maps), we fall back
+    // to dlopen(RTLD_NOLOAD) which returns the handle of the existing mapping
+    // without creating a new one. If RTLD_NOLOAD also returns null, the library
+    // genuinely isn't loaded and no hook can be installed at this point.
+    ElfScanner elfScanner = ElfScanner::createWithPath(libName);
+    void* libHandle = nullptr;
+
+    // Obtain fallback handle only if ElfScanner found the library already mapped.
+    // RTLD_NOLOAD never creates a new mapping — safe for namespace isolation.
+    if (!elfScanner.isValid()) {
+        libHandle = dlopen(libName.c_str(), RTLD_NOLOAD | RTLD_NOW);
+        if (libHandle) {
+            LOGI("ElfScanner not found, using RTLD_NOLOAD handle=%p", libHandle);
+        } else {
+            LOGI("Library %s not yet in /proc/self/maps and RTLD_NOLOAD=null", libName.c_str());
+        }
     } else {
-        LOGI("dlopen(%s) ok, handle=%p", libName.c_str(), libHandle);
+        LOGI("ElfScanner found %s", libName.c_str());
     }
 
-    uintptr_t set_symbol = HookCompat::get_set_symbol_dlsym(libHandle);
+    uintptr_t set_symbol = elfScanner.isValid()
+        ? HookCompat::get_set_symbol(elfScanner)
+        : HookCompat::get_set_symbol_dlsym(libHandle);
     LOGI("AudioRecord::set at %p", (void*) set_symbol);
-    uintptr_t obtainBuffer_symbol = HookCompat::get_obtainBuffer_symbol_dlsym(libHandle);
+
+    uintptr_t obtainBuffer_symbol = elfScanner.isValid()
+        ? HookCompat::get_obtainBuffer_symbol(elfScanner)
+        : HookCompat::get_obtainBuffer_symbol_dlsym(libHandle);
     LOGI("AudioRecord::obtainBuffer at %p", (void*) obtainBuffer_symbol);
-    uintptr_t stop_symbol = HookCompat::get_stop_symbol_dlsym(libHandle);
+
+    uintptr_t stop_symbol = elfScanner.isValid()
+        ? HookCompat::get_stop_symbol(elfScanner)
+        : HookCompat::get_stop_symbol_dlsym(libHandle);
     LOGI("AudioRecord::stop at %p", (void*) stop_symbol);
 
     if (obtainBuffer_symbol != 0) {
@@ -300,6 +323,12 @@ Java_tn_amin_phantom_1mic_PhantomManager_nativeHook(JNIEnv *env, jobject thiz) {
     }
 
     uintptr_t ctor_symbol = HookCompat::get_ctor_symbol_dlsym(libHandle);
+    if (ctor_symbol == 0 && elfScanner.isValid()) {
+        // try ElfScanner for ctor too if available
+        ctor_symbol = HookCompat::get_symbol(elfScanner, {
+            "_ZN7android11AudioRecordC1E14audio_source_tj14audio_format_t20audio_channel_mask_tRKNS_7content22AttributionSourceStateEmRKNS_2wpINS0_20IAudioRecordCallbackEEEj15audio_session_tNS0_13transfer_typeE19audio_input_flags_tPK18audio_attributes_ti28audio_microphone_direction_tf",
+        });
+    }
     LOGI("AudioRecord::AudioRecord(C1) at %p", (void*) ctor_symbol);
 
     if (set_symbol != 0) {
@@ -323,7 +352,9 @@ Java_tn_amin_phantom_1mic_PhantomManager_nativeHook(JNIEnv *env, jobject thiz) {
         g_phantomBridge->load(env);
     }
 
-    uintptr_t start_symbol = HookCompat::get_start_symbol_dlsym(libHandle);
+    uintptr_t start_symbol = elfScanner.isValid()
+        ? HookCompat::get_start_symbol(elfScanner)
+        : HookCompat::get_start_symbol_dlsym(libHandle);
     LOGI("AudioRecord::start at %p", (void*) start_symbol);
     if (start_symbol != 0) {
         hook_func((void*) start_symbol, (void*) start_hook, (void**) &start_backup);
