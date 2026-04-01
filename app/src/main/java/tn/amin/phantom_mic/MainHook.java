@@ -44,43 +44,53 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     private void loadNativeLibrary() {
-        // The .so IS extracted to disk by the installer (extractNativeLibs=true).
-        // Path: {apkDir}/lib/arm64/libxposedlab.so
-        // LSPosed's classloader string contains: module=/data/app/.../{pkg}-hash/base.apk
-        // We parse that to derive the parent dir without needing directory listing (no perms).
+        // LSPosed classloader uses base.apk!/lib/arm64-v8a (compressed) which Android 16
+        // blocks for W^X. The APK installer extracts .so files to disk (extractNativeLibs=true).
+        // We parse the apk path from the classloader string and derive {apkDir}/lib/arm64/.
+        String apkParentDir = null;
         try {
             String clStr = MainHook.class.getClassLoader().toString();
-            Logger.d("ClassLoader: " + clStr.substring(0, Math.min(300, clStr.length())));
-
             java.util.regex.Matcher m = java.util.regex.Pattern
                     .compile("module=([^,\\]]+/base\\.apk)")
                     .matcher(clStr);
             if (m.find()) {
-                String apkPath = m.group(1);
-                File appDir = new File(apkPath).getParentFile();
-                Logger.d("APK parent dir: " + appDir);
-
-                String primaryAbi = android.os.Build.SUPPORTED_ABIS[0]; // e.g. arm64-v8a
-                String canonAbi = primaryAbi.contains("64") ? "arm64" : "arm";
-
-                for (String abiDir : new String[]{canonAbi, primaryAbi, "arm64", "arm64-v8a"}) {
-                    File soFile = new File(appDir, "lib/" + abiDir + "/libxposedlab.so");
-                    Logger.d("Trying: " + soFile.getAbsolutePath() + " exists=" + soFile.exists());
-                    if (soFile.exists()) {
-                        System.load(soFile.getAbsolutePath());
-                        Logger.d("System.load xposedlab OK (" + abiDir + ")");
-                        return;
-                    }
-                }
-                Logger.d("No .so found under " + appDir + "/lib/");
-            } else {
-                Logger.d("Could not parse APK path from classloader string");
+                apkParentDir = new File(m.group(1)).getParent();
+                Logger.d("APK parent dir: " + apkParentDir);
             }
         } catch (Throwable t) {
-            Logger.d("loadNativeLibrary failed: " + t);
+            Logger.d("loadNativeLibrary: parse failed: " + t);
         }
 
-        Logger.d("ERROR: could not load libxposedlab.so");
+        for (String libName : new String[]{"xposedlab", "androidresampler"}) {
+            loadSoFromDisk(libName, apkParentDir);
+        }
+    }
+
+    private void loadSoFromDisk(String libName, String apkParentDir) {
+        // 1. Try extracted path derived from APK dir
+        if (apkParentDir != null) {
+            String primaryAbi = android.os.Build.SUPPORTED_ABIS[0];
+            String canonAbi = primaryAbi.contains("64") ? "arm64" : "arm";
+            for (String abiDir : new String[]{canonAbi, primaryAbi, "arm64", "arm64-v8a"}) {
+                File soFile = new File(apkParentDir + "/lib/" + abiDir + "/lib" + libName + ".so");
+                if (soFile.exists()) {
+                    try {
+                        System.load(soFile.getAbsolutePath());
+                        Logger.d("System.load " + libName + " OK (" + abiDir + ")");
+                        return;
+                    } catch (Throwable t) {
+                        Logger.d("System.load " + libName + " failed (" + abiDir + "): " + t);
+                    }
+                }
+            }
+        }
+        // 2. Fallback: standard loadLibrary (works on older Android / non-LSPosed)
+        try {
+            System.loadLibrary(libName);
+            Logger.d("loadLibrary " + libName + " OK");
+        } catch (Throwable t) {
+            Logger.d("ERROR: could not load lib" + libName + ".so: " + t);
+        }
     }
 
     private void doHook(XC_LoadPackage.LoadPackageParam lpparam) {
