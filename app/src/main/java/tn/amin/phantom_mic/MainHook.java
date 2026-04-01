@@ -99,6 +99,10 @@ public class MainHook implements IXposedHookLoadPackage {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                 Logger.d("AudioRecord start");
+                // libaudioclient.so is guaranteed loaded by now — install native hooks once.
+                if (phantomManager != null) {
+                    phantomManager.initNativeHooks();
+                }
             }
         });
 
@@ -185,7 +189,7 @@ public class MainHook implements IXposedHookLoadPackage {
     }
 
     private void initPhantomManager(Context context) {
-        phantomManager = new PhantomManager(context, isNativeHook());
+        phantomManager = new PhantomManager(context);
 
         if (isSpecialCase()) {
             phantomManager.forceUriPath();
@@ -196,9 +200,5 @@ public class MainHook implements IXposedHookLoadPackage {
         return packageName.equals("com.whatsapp")
                 || packageName.equals("com.whatsapp.w4b")
                 || packageName.equals("com.android.soundrecorder");
-    }
-
-    public boolean isNativeHook() {
-        return true;
     }
 }

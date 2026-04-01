@@ -40,8 +40,9 @@ public class PhantomManager {
     private final SPManager mSPManager;
     private final FileManager mFileManager;
     private boolean mNeedPrepare = true;
+    private boolean mNativeHooked = false;
 
-    public PhantomManager(Context context, boolean isNativeHook) {
+    public PhantomManager(Context context) {
         Logger.d("Init phantom manager");
 
         mContext = new WeakReference<>(context);
@@ -50,7 +51,20 @@ public class PhantomManager {
         mSPManager = new SPManager(context);
         mFileManager = new FileManager(context);
 
-        if (isNativeHook) {
+        // Do NOT call nativeHook() here — libaudioclient.so is not yet loaded.
+        // It will be called lazily from initNativeHooks() when AudioRecord.startRecording()
+        // is intercepted, at which point the library is guaranteed in /proc/self/maps.
+    }
+
+    /**
+     * Install native hooks. Must be called after AudioRecord has been constructed
+     * (i.e. from startRecording hook) so that libaudioclient.so is already loaded.
+     * Safe to call multiple times — only runs once.
+     */
+    public synchronized void initNativeHooks() {
+        if (!mNativeHooked) {
+            mNativeHooked = true;
+            Logger.d("Installing native hooks (deferred)");
             nativeHook();
         }
     }
