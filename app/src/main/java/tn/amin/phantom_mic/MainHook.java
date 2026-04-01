@@ -35,7 +35,7 @@ public class MainHook implements IXposedHookLoadPackage {
             needHook = false;
 
             packageName = lpparam.packageName;
-            loadNativeLibrary(lpparam);
+            loadNativeLibrary();
 
             Logger.d("Beginning hook");
             doHook(lpparam);
@@ -43,37 +43,59 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    private void loadNativeLibrary(XC_LoadPackage.LoadPackageParam lpparam) {
-        // LspModuleClassLoader only adds base.apk!/lib/arm64-v8a to its native library
-        // search path — it does NOT add the extracted lib dir even when
-        // extractNativeLibs="true". So System.loadLibrary() fails with "couldn't find".
-        // Fix: derive the extracted path from the module APK path via the classloader
-        // string representation and use System.load() with the absolute path.
+    private void loadNativeLibrary() {
+        // 1. Standard path — works if LSPosed configures the native lib dir correctly.
         try {
             System.loadLibrary("xposedlab");
-            Logger.d("loadLibrary xposedlab OK (APK path)");
+            Logger.d("loadLibrary xposedlab OK (standard)");
             return;
         } catch (UnsatisfiedLinkError ignored) {}
 
-        // LspModuleClassLoader.toString() contains "module=/data/app/.../base.apk"
-        // Extracted libs live at /data/app/.../<pkg>-<hash>/lib/arm64/
+        // 2. Derive the module's own APK path from MainHook's code source.
+        //    lpparam.classLoader is the TARGET APP's classloader (WhatsApp), not ours.
+        //    MainHook.class.getProtectionDomain().getCodeSource() gives PhantomMic's APK.
         try {
-            String clStr = lpparam.classLoader.toString();
-            int start = clStr.indexOf("/data/app/");
-            int end = clStr.indexOf("/base.apk");
-            if (start >= 0 && end > start) {
-                String pkgDir = clStr.substring(start, end);
-                String abi = Build.SUPPORTED_64_BIT_ABIS.length > 0 ? "arm64" : "arm";
-                File libFile = new File(pkgDir + "/lib/" + abi + "/libxposedlab.so");
-                Logger.d("Trying extracted path: " + libFile.getAbsolutePath() + " exists=" + libFile.exists());
-                if (libFile.exists()) {
-                    System.load(libFile.getAbsolutePath());
-                    Logger.d("System.load xposedlab OK (extracted path)");
-                    return;
+            java.security.CodeSource cs = MainHook.class.getProtectionDomain().getCodeSource();
+            if (cs != null) {
+                String apkPath = cs.getLocation().getPath(); // .../tn.amin.phantom_mic-.../base.apk
+                String dir = apkPath.substring(0, apkPath.lastIndexOf('/'));
+                for (String abi : new String[]{"arm64-v8a", "arm64", "armeabi-v7a"}) {
+                    File soFile = new File(dir + "/lib/" + abi + "/libxposedlab.so");
+                    Logger.d("Trying: " + soFile.getAbsolutePath() + " exists=" + soFile.exists());
+                    if (soFile.exists()) {
+                        System.load(soFile.getAbsolutePath());
+                        Logger.d("System.load xposedlab OK (" + abi + ")");
+                        return;
+                    }
                 }
             }
         } catch (UnsatisfiedLinkError | Exception e) {
-            Logger.d("Extracted load failed: " + e.getMessage());
+            Logger.d("CodeSource load failed: " + e.getMessage());
+        }
+
+        // 3. Last resort: scan /data/app/ for the module package directory.
+        try {
+            File appDir = new File("/data/app/");
+            File[] dirs1 = appDir.listFiles();
+            if (dirs1 != null) {
+                for (File d1 : dirs1) {
+                    File[] dirs2 = d1.listFiles();
+                    if (dirs2 == null) continue;
+                    for (File d2 : dirs2) {
+                        if (!d2.getName().startsWith("tn.amin.phantom_mic")) continue;
+                        for (String abi : new String[]{"arm64-v8a", "arm64"}) {
+                            File soFile = new File(d2, "lib/" + abi + "/libxposedlab.so");
+                            if (soFile.exists()) {
+                                System.load(soFile.getAbsolutePath());
+                                Logger.d("System.load xposedlab OK (scan: " + soFile + ")");
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (UnsatisfiedLinkError | Exception e) {
+            Logger.d("Scan load failed: " + e.getMessage());
         }
 
         Logger.d("ERROR: could not load libxposedlab.so from any path");
