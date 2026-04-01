@@ -12,10 +12,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import io.github.nailik.androidresampler.Resampler;
-import io.github.nailik.androidresampler.ResamplerConfiguration;
-import io.github.nailik.androidresampler.data.ResamplerChannel;
-import io.github.nailik.androidresampler.data.ResamplerQuality;
 import tn.amin.phantom_mic.log.Logger;
 
 public class AudioMaster {
@@ -26,7 +22,7 @@ public class AudioMaster {
     // in case WhatsApp reuses the AudioRecord object (set_hook doesn't fire again).
     private AudioFormat mLastKnownOutFormat = null;
     private boolean mIsLoading = false;
-    private Resampler mResampler = null;
+    private LinearResampler mResampler = null;
 
     // Source format stored at load() time so setFormat() can recreate the
     // Resampler even if set_hook fires after decoding has already started.
@@ -272,18 +268,14 @@ public class AudioMaster {
         }
     }
 
-    private Resampler buildResampler(int srcSampleRate, int srcChannelCount) {
+    private LinearResampler buildResampler(int srcSampleRate, int srcChannelCount) {
         if (mOutFormat == null) return null;
         // Channel downmix (stereo→mono) is done manually BEFORE calling the Resampler,
         // so the Resampler always receives post-downmix (at most mono) input.
         int effectiveSrcCh = (srcChannelCount >= 2 && mOutFormat.getChannelCount() == 1) ? 1 : srcChannelCount;
-        ResamplerChannel inChannel  = effectiveSrcCh  == 1 ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
-        ResamplerChannel outChannel = mOutFormat.getChannelCount() == 1 ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
-        Logger.d("[AudioMaster] buildResampler: " + srcSampleRate + "Hz " + inChannel
-                + " → " + mOutFormat.getSampleRate() + "Hz " + outChannel);
-        return new Resampler(new ResamplerConfiguration(
-                ResamplerQuality.BEST, inChannel, srcSampleRate,
-                outChannel, mOutFormat.getSampleRate()));
+        Logger.d("[AudioMaster] buildResampler: " + srcSampleRate + "Hz " + effectiveSrcCh
+                + "ch → " + mOutFormat.getSampleRate() + "Hz " + mOutFormat.getChannelCount() + "ch");
+        return new LinearResampler(srcSampleRate, effectiveSrcCh, mOutFormat.getSampleRate());
     }
 
     public AudioFormat getFormat() {

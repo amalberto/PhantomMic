@@ -61,9 +61,7 @@ public class MainHook implements IXposedHookLoadPackage {
             Logger.d("loadNativeLibrary: parse failed: " + t);
         }
 
-        for (String libName : new String[]{"xposedlab", "androidresampler"}) {
-            loadSoFromDisk(libName, apkParentDir);
-        }
+        loadSoFromDisk("xposedlab", apkParentDir);
     }
 
     private void loadSoFromDisk(String libName, String apkParentDir) {
