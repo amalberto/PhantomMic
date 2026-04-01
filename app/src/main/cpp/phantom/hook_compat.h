@@ -84,6 +84,17 @@ namespace HookCompat {
         });
     }
 
+    uintptr_t get_ctor_symbol_dlsym(void* handle) {
+        return get_symbol_dlsym(handle, {
+            // Android 16: AudioRecord(audio_source_t, uint, audio_format_t,
+            //   audio_channel_mask_t, const AttributionSourceState&, size_t,
+            //   wp<IAudioRecordCallback> const&, uint, audio_session_t,
+            //   transfer_type, audio_input_flags_t, const audio_attributes_t*,
+            //   int, audio_microphone_direction_t, float)
+            "_ZN7android11AudioRecordC1E14audio_source_tj14audio_format_t20audio_channel_mask_tRKNS_7content22AttributionSourceStateEmRKNS_2wpINS0_20IAudioRecordCallbackEEEj15audio_session_tNS0_13transfer_typeE19audio_input_flags_tPK18audio_attributes_ti28audio_microphone_direction_tf",
+        });
+    }
+
     uintptr_t get_start_symbol_dlsym(void* handle) {
         return get_symbol_dlsym(handle, {
             "_ZN7android11AudioRecord5startENS_11AudioSystem12sync_event_tE15audio_session_t"

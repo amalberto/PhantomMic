@@ -157,5 +157,11 @@ public class PhantomManager {
         return mNeedPrepare;
     }
 
+    /** Called from JNI (obtainBuffer_hook) to confirm audio injection is working. */
+    @SuppressWarnings("unused")
+    public void reportInjection(int count) {
+        Logger.d("(PhantomMic) *** INJECTING AUDIO count=" + count);
+    }
+
     private native void nativeHook();
 }

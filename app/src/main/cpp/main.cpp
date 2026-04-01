@@ -47,13 +47,23 @@ int32_t  obtainBuffer_hook(void* v0, void* v1, void* v2, void* v3, void* v4) {
     size_t frameSize = size / frameCount;
     char* raw = * (char**) ((uintptr_t) v1 + sizeof(size_t) * 2);
 
-    if (g_phantomBridge->overwrite_buffer(raw, size) && need_log > 0) {
-        LOGI("Overwritten data");
-    }
+    bool injected = g_phantomBridge->overwrite_buffer(raw, size);
 
+    static int injectCount = 0;
+    if (injected) {
+        injectCount++;
+        if (injectCount == 1 || injectCount % 200 == 0) {
+            JNIEnv* env;
+            if (JVM->AttachCurrentThread(&env, nullptr) == JNI_OK) {
+                jclass cls = env->GetObjectClass(j_phantomManager);
+                jmethodID mid = env->GetMethodID(cls, "reportInjection", "(I)V");
+                if (mid) env->CallVoidMethod(j_phantomManager, mid, injectCount);
+            }
+        }
+    }
     if (need_log > 0) {
         need_log--;
-        LOGI("[%zu] Inside obtainBuffer (%zu x %zu = %zu)", acc_frame_count, frameCount, frameSize, size);
+        LOGI("[%zu] Inside obtainBuffer size=%zu injected=%d", acc_frame_count, size, injected ? 1 : 0);
     }
 
     acc_frame_count += frameCount;
@@ -175,6 +185,35 @@ int32_t set_hook_legacy(void* thiz, int32_t inputSource, uint32_t sampleRate,
     return result;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CONSTRUCTOR hook — Android 16+
+//   AudioRecord::set() was merged into the constructor in Android 16.
+//   Symbol: _ZN7android11AudioRecordC1E...
+//   Params (ARM64 regs): this, inputSource, sampleRate, format, channelMask,
+//   attributionSource(ref), frameCount, cbf(ref), notificationFrames,
+//   sessionId, transferType, flags, pAttributes, micDir, micFieldDimension
+// ─────────────────────────────────────────────────────────────────────────────
+typedef void (*ctor_backup_t)(void*, int32_t, uint32_t, uint32_t, uint32_t,
+                               void*, size_t, void*, uint32_t, int32_t, int32_t,
+                               uint32_t, void*, int32_t, float);
+ctor_backup_t ctor_backup = nullptr;
+void  ctor_hook(void* thiz, int32_t inputSource, uint32_t sampleRate,
+                uint32_t format, uint32_t channelMask,
+                void* attributionSource, size_t frameCount, void* cbf,
+                uint32_t notificationFrames, int32_t sessionId, int32_t transferType,
+                uint32_t flags, void* pAttributes, int32_t micDir, float micFieldDimension) {
+    LOGI("[ctor_hook] PRE inputSource=%d sampleRate=%u format=0x%x channelMask=0x%x",
+         inputSource, sampleRate, format, channelMask);
+    ctor_backup(thiz, inputSource, sampleRate, format, channelMask,
+                attributionSource, frameCount, cbf, notificationFrames,
+                sessionId, transferType, flags, pAttributes, micDir, micFieldDimension);
+    LOGI("[ctor_hook] POST — calling update_audio_format");
+    JNIEnv* env;
+    JVM->AttachCurrentThread(&env, nullptr);
+    g_phantomBridge->update_audio_format(env, (int)sampleRate, (int)format, (int)channelMask);
+    g_phantomBridge->load(env);
+}
+
 // AudioRecord::start(AudioSystem::sync_event_t, audio_session_t)
 // Symbol: _ZN7android11AudioRecord5startENS_11AudioSystem12sync_event_tE15audio_session_t
 int32_t (*start_backup)(void* thiz, int32_t syncEvent, int32_t triggerSession);
@@ -260,6 +299,9 @@ Java_tn_amin_phantom_1mic_PhantomManager_nativeHook(JNIEnv *env, jobject thiz) {
         LOGE("AudioRecord::stop symbol not found — resources will not be released on stop");
     }
 
+    uintptr_t ctor_symbol = HookCompat::get_ctor_symbol_dlsym(libHandle);
+    LOGI("AudioRecord::AudioRecord(C1) at %p", (void*) ctor_symbol);
+
     if (set_symbol != 0) {
         int api = android_get_device_api_level();
         if (api >= 33) {
@@ -269,8 +311,12 @@ Java_tn_amin_phantom_1mic_PhantomManager_nativeHook(JNIEnv *env, jobject thiz) {
             hook_func((void*) set_symbol, (void*) set_hook_legacy, (void**) &set_backup_legacy);
             LOGI("Hooked AudioRecord::set (legacy, api=%d)", api);
         }
+    } else if (ctor_symbol != 0) {
+        LOGI("AudioRecord::set not found — hooking constructor C1 instead (Android 16+)");
+        hook_func((void*) ctor_symbol, (void*) ctor_hook, (void**) &ctor_backup);
+        LOGI("Hooked AudioRecord::AudioRecord(C1)");
     } else {
-        LOGE("AudioRecord::set symbol not found — using PCM default (16000Hz mono PCM16)");
+        LOGE("AudioRecord::set and C1 not found — using PCM default (16000Hz mono PCM16)");
         // Provide a safe default format so PCM chunks are not discarded.
         // 0x1 = AUDIO_FORMAT_PCM_16_BIT, 0x10 = AUDIO_CHANNEL_IN_MONO
         g_phantomBridge->update_audio_format(env, 16000, 0x1, 0x10);
