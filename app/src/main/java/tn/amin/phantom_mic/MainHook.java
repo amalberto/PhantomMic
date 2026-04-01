@@ -3,7 +3,6 @@ package tn.amin.phantom_mic;
 import android.app.Activity;
 import android.app.Application;
 import android.content.Context;
-import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.net.Uri;
 import android.os.Bundle;
@@ -140,15 +139,6 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private void initPhantomManager(Context context) {
         phantomManager = new PhantomManager(context, isNativeHook());
-        // Pre-initialise with a safe PCM default; the native set() hook will
-        // override this with the real format once AudioRecord::set() fires.
-        // This mirrors WhatsMicFix's permissive-mode fallback and avoids a
-        // null-format crash on the first obtainBuffer() call.
-        phantomManager.updateAudioFormat(
-                48000,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT);
-        Logger.d("Pre-initialised PCM default: 48000 Hz / MONO / PCM_16BIT");
 
         if (isSpecialCase()) {
             phantomManager.forceUriPath();
