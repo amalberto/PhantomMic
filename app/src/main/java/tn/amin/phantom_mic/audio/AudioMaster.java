@@ -56,8 +56,14 @@ public class AudioMaster {
                         + " channelCount=" + mOutFormat.getChannelCount()
                         + " encoding=" + mOutFormat.getEncoding());
 
-                // Create Resampler once for this file so state is preserved across chunks
-                ResamplerChannel inChannel = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) == 1
+                // Create Resampler once for this file so state is preserved across chunks.
+                // Channel downmix (stereo→mono) is handled manually in processInBuffer
+                // BEFORE resampling, so the Resampler always sees the post-downmix channel
+                // count as input (avoids relying on SpeexDSP channel mixing).
+                int effectiveSrcChannels = Math.min(
+                        format.getInteger(MediaFormat.KEY_CHANNEL_COUNT),
+                        mOutFormat.getChannelCount());
+                ResamplerChannel inChannel = effectiveSrcChannels == 1
                         ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
                 ResamplerChannel outChannel = mOutFormat.getChannelCount() == 1
                         ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
@@ -130,7 +136,10 @@ public class AudioMaster {
                 Logger.d("Format changed to " + format);
                 // Recreate resampler with updated source format to avoid pitch/speed drift
                 if (mOutFormat != null) {
-                    ResamplerChannel inChannel = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) == 1
+                    int effectiveSrcCh = Math.min(
+                            format.getInteger(MediaFormat.KEY_CHANNEL_COUNT),
+                            mOutFormat.getChannelCount());
+                    ResamplerChannel inChannel = effectiveSrcCh == 1
                             ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
                     ResamplerChannel outChannel = mOutFormat.getChannelCount() == 1
                             ? ResamplerChannel.MONO : ResamplerChannel.STEREO;
@@ -169,10 +178,41 @@ public class AudioMaster {
             return;
         }
 
+        int srcChannels = source.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+        int dstChannels = mOutFormat.getChannelCount();
+
+        // Manual stereo-to-mono downmix BEFORE resampling.
+        // SpeexDSP (used internally by the Resampler library) processes channels
+        // independently and does NOT downmix — if we skip this step, stereo PCM
+        // is fed into a mono-configured pipeline, producing 2x the expected byte
+        // count → WhatsApp consumes it at 2x speed → accelerated audio.
+        byte[] input = bufferChunk;
+        if (srcChannels == 2 && dstChannels == 1) {
+            input = downmixStereoToMono(bufferChunk);
+        }
+
         // Reuse the stateful Resampler (created in load()) so sample history is
         // preserved across chunks — avoids clicks/artefacts at every chunk boundary.
-        byte[] resampledChunk = mResampler.resample(bufferChunk);
+        byte[] resampledChunk = mResampler.resample(input);
         onBufferChunkLoaded(resampledChunk);
+    }
+
+    /**
+     * Converts interleaved stereo PCM_16BIT (L0 R0 L1 R1 …) to mono PCM_16BIT
+     * by averaging left and right samples.  Output is half the size of the input.
+     */
+    private static byte[] downmixStereoToMono(byte[] stereo) {
+        int frames = stereo.length / 4; // 4 bytes per stereo frame (2 ch × 2 bytes)
+        byte[] mono = new byte[frames * 2];
+        for (int i = 0; i < frames; i++) {
+            // Little-endian int16 for left and right channels
+            short l = (short) ((stereo[i * 4 + 1] << 8) | (stereo[i * 4] & 0xFF));
+            short r = (short) ((stereo[i * 4 + 3] << 8) | (stereo[i * 4 + 2] & 0xFF));
+            short m = (short) ((l + r) >> 1);
+            mono[i * 2]     = (byte) (m & 0xFF);
+            mono[i * 2 + 1] = (byte) ((m >> 8) & 0xFF);
+        }
+        return mono;
     }
 
     public void setFormat(AudioFormat format) {

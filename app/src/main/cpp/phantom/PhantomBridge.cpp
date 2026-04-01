@@ -55,7 +55,10 @@ void PhantomBridge::on_buffer_chunk_loaded(jbyte *buffer, jsize size) {
         m_buffer = (jbyte*) malloc(m_buffer_size);
     }
 
-    while (m_buffer_write_position + size > m_buffer_size) {
+    // For PCM_FLOAT the write expands int16 (2 bytes/sample) → float32 (4 bytes/sample),
+    // so reserve 2× the input size to avoid buffer overflow.
+    size_t writeSize = (mAudioFormat == 0x5u) ? (size_t)size * 2 : (size_t)size;
+    while (m_buffer_write_position + writeSize > m_buffer_size) {
         m_buffer_size *= 2;
         m_buffer = (jbyte*) realloc(m_buffer, m_buffer_size);
     }
