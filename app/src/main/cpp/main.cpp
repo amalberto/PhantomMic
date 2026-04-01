@@ -88,16 +88,17 @@ void  stop_hook(void* thiz) {
     stop_backup(thiz);
 
     if (thiz != g_target_ar) {
-        LOGI("[stop_hook] Ignoring stop for non-target ar=%p", thiz);
+        LOGI("[stop_hook] Ignored stop for non-target ar=%p", thiz);
         return;
     }
 
-    LOGI("[stop_hook] Stopping target ar=%p", thiz);
-    g_target_ar = nullptr;  // reset so next recording can pick a new target
-
-    JNIEnv* env;
-    JVM->AttachCurrentThread(&env, nullptr);
-    g_phantomBridge->unload(env);
+    // Do NOT unload the buffer here. WhatsApp Business internally calls stop()
+    // mid-recording (e.g. for AEC cycling) while the user is still holding the
+    // mic button. Unloading here destroys the PCM and causes silence for the
+    // rest of the recording. The buffer is reset naturally in update_audio_format
+    // when the next recording session begins.
+    LOGI("[stop_hook] stop() for target ar=%p — keeping buffer alive", thiz);
+    g_target_ar = nullptr;  // allow next AudioRecord to become the new target
 }
 
 // AUDIO_SOURCE_* constants (keep in sync with AudioSource.aidl)

@@ -111,8 +111,15 @@ bool PhantomBridge::overwrite_buffer_locked(char* buffer, int size) {
 
     if (m_buffer_read_position + size > m_buffer_write_position) {
         if (m_buffer_loaded) {
-            // Audio finished — output silence instead of looping.
-            memset(buffer, 0, size);
+            // Audio finished: serve remaining bytes (if any) + pad with silence.
+            size_t remaining = m_buffer_write_position - m_buffer_read_position;
+            if (remaining > 0) {
+                memcpy(buffer, m_buffer + m_buffer_read_position, remaining);
+                memset(buffer + remaining, 0, size - remaining);
+                m_buffer_read_position = m_buffer_write_position;
+            } else {
+                memset(buffer, 0, size);
+            }
             return true;
         }
         // Still loading: inject silence so WhatsApp gets valid PCM
