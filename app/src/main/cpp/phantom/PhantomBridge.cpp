@@ -101,15 +101,19 @@ bool PhantomBridge::overwrite_buffer(char* buffer, int size) {
 }
 
 bool PhantomBridge::overwrite_buffer_locked(char* buffer, int size) {
+    // Guard: buffer not yet allocated or empty (all chunks were discarded, e.g.
+    // mOutFormat was null during decode).  Output silence so WhatsApp gets
+    // valid PCM and we don't spin in a recursive/infinite loop.
+    if (m_buffer == nullptr || m_buffer_write_position == 0) {
+        memset(buffer, 0, size);
+        return false;
+    }
+
     if (m_buffer_read_position + size > m_buffer_write_position) {
         if (m_buffer_loaded) {
-            // Loop: fill remainder then wrap
-            int until_bounds = m_buffer_write_position - m_buffer_read_position;
-            if (until_bounds > 0) {
-                memcpy(buffer, m_buffer + m_buffer_read_position, until_bounds);
-            }
-            m_buffer_read_position = 0;
-            return overwrite_buffer_locked(buffer + until_bounds, size - until_bounds);
+            // Audio finished — output silence instead of looping.
+            memset(buffer, 0, size);
+            return true;
         }
         // Still loading: inject silence so WhatsApp gets valid PCM
         memset(buffer, 0, size);

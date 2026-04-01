@@ -225,13 +225,25 @@ Java_tn_amin_phantom_1mic_PhantomManager_nativeHook(JNIEnv *env, jobject thiz) {
 
     std::string libName = HookCompat::get_library_name();
     LOGI("Target library: %s", libName.c_str());
-    ElfScanner g_libTargetELF = ElfScanner::createWithPath(libName);
 
-    uintptr_t set_symbol = HookCompat::get_set_symbol(g_libTargetELF);
+    // Force-load the target library into the process before any symbol lookup.
+    // nativeHook() runs at Application.onCreate() — before WhatsApp creates its
+    // first AudioRecord — so libaudioclient.so is NOT yet in /proc/self/maps.
+    // ElfScanner::createWithPath() would return an invalid scanner (base=0) and
+    // all findSymbol() calls would return 0. Using dlopen() ensures the library
+    // is resident in memory so both dlsym() and ElfScanner work correctly.
+    void* libHandle = dlopen(libName.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    if (!libHandle) {
+        LOGE("dlopen(%s) failed: %s", libName.c_str(), dlerror());
+    } else {
+        LOGI("dlopen(%s) ok, handle=%p", libName.c_str(), libHandle);
+    }
+
+    uintptr_t set_symbol = HookCompat::get_set_symbol_dlsym(libHandle);
     LOGI("AudioRecord::set at %p", (void*) set_symbol);
-    uintptr_t obtainBuffer_symbol = HookCompat::get_obtainBuffer_symbol(g_libTargetELF);
+    uintptr_t obtainBuffer_symbol = HookCompat::get_obtainBuffer_symbol_dlsym(libHandle);
     LOGI("AudioRecord::obtainBuffer at %p", (void*) obtainBuffer_symbol);
-    uintptr_t stop_symbol = HookCompat::get_stop_symbol(g_libTargetELF);
+    uintptr_t stop_symbol = HookCompat::get_stop_symbol_dlsym(libHandle);
     LOGI("AudioRecord::stop at %p", (void*) stop_symbol);
 
     if (obtainBuffer_symbol != 0) {
@@ -251,21 +263,21 @@ Java_tn_amin_phantom_1mic_PhantomManager_nativeHook(JNIEnv *env, jobject thiz) {
     if (set_symbol != 0) {
         int api = android_get_device_api_level();
         if (api >= 33) {
-            // Android 13+ (API 33+): wp<IAudioRecordCallback> const& — no void* user
             hook_func((void*) set_symbol, (void*) set_hook_modern, (void**) &set_backup_modern);
             LOGI("Hooked AudioRecord::set (modern, api=%d)", api);
         } else {
-            // Android 7–12L (API 24–32): callback_t + void* user
             hook_func((void*) set_symbol, (void*) set_hook_legacy, (void**) &set_backup_legacy);
             LOGI("Hooked AudioRecord::set (legacy, api=%d)", api);
         }
     } else {
-        LOGE("AudioRecord::set symbol not found — format detection unavailable, using PCM default");
-        // Trigger load now with the pre-initialised PCM default format
+        LOGE("AudioRecord::set symbol not found — using PCM default (16000Hz mono PCM16)");
+        // Provide a safe default format so PCM chunks are not discarded.
+        // 0x1 = AUDIO_FORMAT_PCM_16_BIT, 0x10 = AUDIO_CHANNEL_IN_MONO
+        g_phantomBridge->update_audio_format(env, 16000, 0x1, 0x10);
         g_phantomBridge->load(env);
     }
 
-    uintptr_t start_symbol = HookCompat::get_start_symbol(g_libTargetELF);
+    uintptr_t start_symbol = HookCompat::get_start_symbol_dlsym(libHandle);
     LOGI("AudioRecord::start at %p", (void*) start_symbol);
     if (start_symbol != 0) {
         hook_func((void*) start_symbol, (void*) start_hook, (void**) &start_backup);
