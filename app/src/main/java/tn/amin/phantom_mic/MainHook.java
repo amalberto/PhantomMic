@@ -5,8 +5,11 @@ import android.app.Application;
 import android.content.Context;
 import android.media.AudioRecord;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.PersistableBundle;
+
+import java.io.File;
 
 import java.nio.ByteBuffer;
 
@@ -32,12 +35,48 @@ public class MainHook implements IXposedHookLoadPackage {
             needHook = false;
 
             packageName = lpparam.packageName;
-            System.loadLibrary("xposedlab");
+            loadNativeLibrary(lpparam);
 
             Logger.d("Beginning hook");
             doHook(lpparam);
             Logger.d("Successful hook");
         }
+    }
+
+    private void loadNativeLibrary(XC_LoadPackage.LoadPackageParam lpparam) {
+        // LspModuleClassLoader only adds base.apk!/lib/arm64-v8a to its native library
+        // search path — it does NOT add the extracted lib dir even when
+        // extractNativeLibs="true". So System.loadLibrary() fails with "couldn't find".
+        // Fix: derive the extracted path from the module APK path via the classloader
+        // string representation and use System.load() with the absolute path.
+        try {
+            System.loadLibrary("xposedlab");
+            Logger.d("loadLibrary xposedlab OK (APK path)");
+            return;
+        } catch (UnsatisfiedLinkError ignored) {}
+
+        // LspModuleClassLoader.toString() contains "module=/data/app/.../base.apk"
+        // Extracted libs live at /data/app/.../<pkg>-<hash>/lib/arm64/
+        try {
+            String clStr = lpparam.classLoader.toString();
+            int start = clStr.indexOf("/data/app/");
+            int end = clStr.indexOf("/base.apk");
+            if (start >= 0 && end > start) {
+                String pkgDir = clStr.substring(start, end);
+                String abi = Build.SUPPORTED_64_BIT_ABIS.length > 0 ? "arm64" : "arm";
+                File libFile = new File(pkgDir + "/lib/" + abi + "/libxposedlab.so");
+                Logger.d("Trying extracted path: " + libFile.getAbsolutePath() + " exists=" + libFile.exists());
+                if (libFile.exists()) {
+                    System.load(libFile.getAbsolutePath());
+                    Logger.d("System.load xposedlab OK (extracted path)");
+                    return;
+                }
+            }
+        } catch (UnsatisfiedLinkError | Exception e) {
+            Logger.d("Extracted load failed: " + e.getMessage());
+        }
+
+        Logger.d("ERROR: could not load libxposedlab.so from any path");
     }
 
     private void doHook(XC_LoadPackage.LoadPackageParam lpparam) {
