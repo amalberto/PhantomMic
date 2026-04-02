@@ -206,11 +206,8 @@ bool FmodVoiceFilter::process(int16_t* pcm, int numSamples, int sampleRate) {
         return true;
     }
 
-    if (!m_initialized) {
-        LOGW("[FmodVoiceFilter] Not initialized, skipping DSP");
-        return false;
-    }
-
+    // processViaFile() uses pure C++ resampling — no FMOD init required for v1.
+    // (FMOD init is attempted for future DSP quality, but failure is non-fatal.)
     return processViaFile(pcm, numSamples, sampleRate);
 }
 

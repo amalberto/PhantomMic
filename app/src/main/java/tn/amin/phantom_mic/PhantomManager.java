@@ -172,6 +172,23 @@ public class PhantomManager {
     public void load() {
         ensureHasUriPath();
 
+        // Apply voice preset FIRST — independent of whether an audio file is configured.
+        // This also ensures the preset reaches nativeSetPreset() even when no phantom.txt
+        // is set (preset-only mode: voice filter on live mic without a replacement file).
+        String presetName = mFileManager.readLine(mUriPath, FILE_PRESET);
+        if (presetName != null && !presetName.trim().isEmpty()) {
+            Integer presetInt = PRESET_MAP.get(presetName.trim().toUpperCase());
+            if (presetInt != null) {
+                setVoicePreset(presetInt);
+                Logger.d("Voice preset applied: " + presetName.trim() + " (" + presetInt + ")");
+            } else {
+                Logger.d("Unknown preset name: " + presetName.trim() + " — using NONE");
+                setVoicePreset(0);
+            }
+        } else {
+            setVoicePreset(0); // default: no effect
+        }
+
         String fileName = mFileManager.readLine(mUriPath, FILE_CONFIG);
         if (fileName == null || fileName.trim().isEmpty()) {
             Logger.d("No audio file specified");
@@ -188,21 +205,6 @@ public class PhantomManager {
         mAudioMaster.load(fd);
 
         Logger.d("Audio file loaded");
-
-        // Apply voice preset from phantom_preset.txt (written by VoiceCommander)
-        String presetName = mFileManager.readLine(mUriPath, FILE_PRESET);
-        if (presetName != null && !presetName.trim().isEmpty()) {
-            Integer presetInt = PRESET_MAP.get(presetName.trim().toUpperCase());
-            if (presetInt != null) {
-                setVoicePreset(presetInt);
-                Logger.d("Voice preset applied: " + presetName.trim() + " (" + presetInt + ")");
-            } else {
-                Logger.d("Unknown preset name: " + presetName.trim() + " — using NONE");
-                setVoicePreset(0);
-            }
-        } else {
-            setVoicePreset(0); // default: no effect
-        }
     }
 
     private void ensureHasUriPath() {

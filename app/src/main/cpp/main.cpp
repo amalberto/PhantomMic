@@ -49,6 +49,10 @@ void* g_target_ar = nullptr;
 // Real-time FMOD voice filter — applied to mic PCM in obtainBuffer_hook.
 // When preset == NONE this is a passthrough; no file injection occurs.
 FmodVoiceFilter* g_fmodFilter = nullptr;
+// Pending preset: nativeSetPreset() can be called before nativeHook() runs
+// (because load() fires from ctor_hook, before startRecording() triggers nativeHook).
+// We store the value here and apply it once g_fmodFilter is ready.
+static int g_pendingPreset = -1;
 
 int32_t (*obtainBuffer_backup)(void*, void*, void*, void*, void*);
 int32_t  obtainBuffer_hook(void* v0, void* v1, void* v2, void* v3, void* v4) {
@@ -316,6 +320,14 @@ Java_tn_amin_phantom_1mic_PhantomManager_nativeHook(JNIEnv *env, jobject thiz) {
     g_phantomBridge = new PhantomBridge(j_phantomManager);
     // Point g_fmodFilter to the existing filter inside PhantomBridge
     g_fmodFilter = &g_phantomBridge->m_voiceFilter;
+    // Apply any preset that arrived before g_fmodFilter was ready
+    if (g_pendingPreset >= 0) {
+        g_fmodFilter->setPreset(static_cast<VoicePreset>(g_pendingPreset));
+        if (g_pendingPreset != 0 && !g_fmodFilter->isInitialized())
+            g_fmodFilter->init();
+        LOGI("[FmodVoiceFilter] applied queued preset %d", g_pendingPreset);
+        g_pendingPreset = -1;
+    }
 
     LOGI("Doing c++ hook");
 
@@ -433,7 +445,9 @@ Java_tn_amin_phantom_1mic_PhantomManager_nativeSetPreset(JNIEnv *env, jobject th
         }
         LOGI("[FmodVoiceFilter] preset set to %d", preset);
     } else {
-        LOGW("[FmodVoiceFilter] nativeSetPreset called before nativeHook — preset queued");
+        // g_fmodFilter not yet created — store preset so nativeHook() picks it up
+        g_pendingPreset = preset;
+        LOGW("[FmodVoiceFilter] nativeSetPreset called before nativeHook — queuing preset %d", preset);
     }
 }
 
