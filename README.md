@@ -39,6 +39,16 @@ Note: your app might work if it's not on the list, let us know if you tried it!
   
   **<u>Bonus Tip:</u>** use an app like *MacroDroid* or *Tasker* to automate the process
 
+## Companion App: VoiceCommander
+
+[VoiceCommander](https://github.com/amalberto/VoiceCommander) is an optional companion app that makes switching audio clips easier — no need to manually edit `phantom.txt`.
+
+- **Auto-detects** the PhantomMic folder for WhatsApp and WhatsApp Business (requires root)
+- **Lists available clips** from the configured folder
+- **One-tap selection** writes `phantom.txt` automatically
+
+> VoiceCommander is a separate APK. Install both PhantomMic and VoiceCommander, grant root to VoiceCommander, and use it to switch clips before recording.
+
 <details>
 
 <summary>Example</summary>
