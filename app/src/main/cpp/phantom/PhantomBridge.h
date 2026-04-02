@@ -15,6 +15,8 @@ public:
 
     void update_audio_format(JNIEnv* env, int sampleRate, int audioFormat, int channelMask);
 
+    int getSampleRate() const { return m_sampleRate; }
+
     void load(JNIEnv* env);
 
     void on_buffer_chunk_loaded(jbyte* buffer, jsize size);
@@ -35,6 +37,7 @@ private:
     jbyte* m_buffer = nullptr;
 
     int mAudioFormat = 0x1;
+    int m_sampleRate  = 16000;
     std::mutex m_mutex;
 
     bool overwrite_buffer_locked(char* buffer, int size);

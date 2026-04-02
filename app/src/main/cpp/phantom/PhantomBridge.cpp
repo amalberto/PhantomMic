@@ -33,6 +33,7 @@ int audioFormatToJava(int audioFormat) {
 
 
 void PhantomBridge::update_audio_format(JNIEnv* env, int sampleRate, int audioFormat, int channelMask) {
+    m_sampleRate = sampleRate;
     // Any PCM already in the buffer was resampled at the OLD rate.
     // Discard it now so we only serve data resampled at the correct rate.
     {

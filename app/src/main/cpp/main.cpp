@@ -22,6 +22,7 @@
 
 #include "PhantomBridge.h"
 #include "hook_compat.h"
+#include "phantom/FmodVoiceFilter.h"
 
 struct UnknownArgs {
     char data[1024];
@@ -45,6 +46,10 @@ int acc_offset = 0;
 // so the buffer is not consumed 2-3x faster than real-time.
 void* g_target_ar = nullptr;
 
+// Real-time FMOD voice filter — applied to mic PCM in obtainBuffer_hook.
+// When preset == NONE this is a passthrough; no file injection occurs.
+FmodVoiceFilter* g_fmodFilter = nullptr;
+
 int32_t (*obtainBuffer_backup)(void*, void*, void*, void*, void*);
 int32_t  obtainBuffer_hook(void* v0, void* v1, void* v2, void* v3, void* v4) {
     int32_t status = obtainBuffer_backup(v0, v1, v2, v3, v4);
@@ -58,7 +63,27 @@ int32_t  obtainBuffer_hook(void* v0, void* v1, void* v2, void* v3, void* v4) {
     size_t size = * (size_t*) ((uintptr_t) v1 + sizeof(size_t));
     char* raw = * (char**) ((uintptr_t) v1 + sizeof(size_t) * 2);
 
-    bool injected = g_phantomBridge->overwrite_buffer(raw, size);
+    // ── Real-time FMOD voice filter (Option A) ──────────────────────────────
+    // If a preset is active, process the real mic PCM in-place and return it.
+    // File injection (phantomBridge) is only used when preset == NONE.
+    bool injected = false;
+    if (g_fmodFilter != nullptr &&
+        g_fmodFilter->getPreset() != VoicePreset::NONE &&
+        raw != nullptr && size > 0) {
+        // Process mic PCM in-place: int16_t samples, mono
+        int numSamples = (int)(size / sizeof(int16_t));
+        injected = g_fmodFilter->process(
+            reinterpret_cast<int16_t*>(raw), numSamples,
+            g_phantomBridge ? g_phantomBridge->getSampleRate() : 16000);
+        if (injected && (need_log > 0)) {
+            need_log--;
+            LOGI("[obtainBuffer] FMOD RT processed %d samples preset=%d",
+                 numSamples, (int)g_fmodFilter->getPreset());
+        }
+    } else {
+        // Fallback: inject pre-recorded file (original PhantomMic behaviour)
+        injected = g_phantomBridge != nullptr && g_phantomBridge->overwrite_buffer(raw, size);
+    }
 
     static int injectCount = 0;
     if (injected) {
@@ -289,6 +314,8 @@ JNIEXPORT void JNICALL
 Java_tn_amin_phantom_1mic_PhantomManager_nativeHook(JNIEnv *env, jobject thiz) {
     j_phantomManager = env->NewGlobalRef(thiz);
     g_phantomBridge = new PhantomBridge(j_phantomManager);
+    // Point g_fmodFilter to the existing filter inside PhantomBridge
+    g_fmodFilter = &g_phantomBridge->m_voiceFilter;
 
     LOGI("Doing c++ hook");
 
@@ -397,13 +424,16 @@ Java_tn_amin_phantom_1mic_PhantomManager_nativeHook(JNIEnv *env, jobject thiz) {
 extern "C"
 JNIEXPORT void JNICALL
 Java_tn_amin_phantom_1mic_PhantomManager_nativeSetPreset(JNIEnv *env, jobject thiz, jint preset) {
-    if (g_phantomBridge) {
-        g_phantomBridge->m_voiceFilter.setPreset(static_cast<VoicePreset>(preset));
+    if (g_fmodFilter) {
+        g_fmodFilter->setPreset(static_cast<VoicePreset>(preset));
         // Init FMOD lazily on first non-NONE preset
-        if (preset != 0 && !g_phantomBridge->m_voiceFilter.isInitialized()) {
-            g_phantomBridge->m_voiceFilter.init();
+        if (preset != 0 && !g_fmodFilter->isInitialized()) {
+            bool ok = g_fmodFilter->init();
+            LOGI("[FmodVoiceFilter] init on preset change: %s", ok ? "OK" : "FAILED");
         }
         LOGI("[FmodVoiceFilter] preset set to %d", preset);
+    } else {
+        LOGW("[FmodVoiceFilter] nativeSetPreset called before nativeHook — preset queued");
     }
 }
 
