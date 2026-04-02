@@ -207,4 +207,10 @@ public class PhantomManager {
     public native boolean overwriteBuffer(byte[] buffer, int size);
 
     private native void nativeHook();
+
+    private native void nativeSetPreset(int preset);
+
+    public void setVoicePreset(int preset) {
+        nativeSetPreset(preset);
+    }
 }

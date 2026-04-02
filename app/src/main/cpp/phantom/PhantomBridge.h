@@ -7,6 +7,7 @@
 
 #include <jni.h>
 #include <mutex>
+#include "FmodVoiceFilter.h"
 
 class PhantomBridge {
 public:
@@ -37,6 +38,9 @@ private:
     std::mutex m_mutex;
 
     bool overwrite_buffer_locked(char* buffer, int size);
+
+public:
+    FmodVoiceFilter m_voiceFilter;
 };
 
 #endif //PHANTOMMIC_PHANTOMBRIDGE_H

@@ -61,3 +61,13 @@ include_directories(${ANDROID_NDK}/sysroot/usr/include)
 
 find_library(log-lib log)
 target_link_libraries(xposedlab ${log-lib})
+
+# FMOD prebuilt libraries (loaded at runtime via dlopen — NOT link-time deps).
+# Declaring them as IMPORTED ensures AGP copies them into the APK's lib/ dir.
+# Do NOT add them to target_link_libraries — that would create ELF NEEDED entries
+# which the restricted classloader namespace (clns-N) cannot resolve at load time.
+add_library(fmod SHARED IMPORTED)
+set_target_properties(fmod PROPERTIES IMPORTED_LOCATION ${JNILIBS}/libfmod.so)
+
+add_library(fmod_baviux SHARED IMPORTED)
+set_target_properties(fmod_baviux PROPERTIES IMPORTED_LOCATION ${JNILIBS}/libfmod_baviux.so)

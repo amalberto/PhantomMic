@@ -128,6 +128,12 @@ bool PhantomBridge::overwrite_buffer_locked(char* buffer, int size) {
     }
 
     memcpy(buffer, m_buffer + m_buffer_read_position, size);
+
+    // Apply voice filter DSP if active
+    if (m_voiceFilter.getPreset() != VoicePreset::NONE && mAudioFormat == 0x1) {
+        int numSamples = size / sizeof(int16_t);
+        m_voiceFilter.process(reinterpret_cast<int16_t*>(buffer), numSamples, 16000);
+    }
     m_buffer_read_position += size;
 
     return true;

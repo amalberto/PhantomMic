@@ -396,6 +396,19 @@ Java_tn_amin_phantom_1mic_PhantomManager_nativeHook(JNIEnv *env, jobject thiz) {
 
 extern "C"
 JNIEXPORT void JNICALL
+Java_tn_amin_phantom_1mic_PhantomManager_nativeSetPreset(JNIEnv *env, jobject thiz, jint preset) {
+    if (g_phantomBridge) {
+        g_phantomBridge->m_voiceFilter.setPreset(static_cast<VoicePreset>(preset));
+        // Init FMOD lazily on first non-NONE preset
+        if (preset != 0 && !g_phantomBridge->m_voiceFilter.isInitialized()) {
+            g_phantomBridge->m_voiceFilter.init();
+        }
+        LOGI("[FmodVoiceFilter] preset set to %d", preset);
+    }
+}
+
+extern "C"
+JNIEXPORT void JNICALL
 Java_tn_amin_phantom_1mic_audio_AudioMaster_onBufferChunkLoaded(JNIEnv *env, jobject thiz,
                                                                 jbyteArray buffer_chunk) {
     jbyte* buffer = env->GetByteArrayElements(buffer_chunk, nullptr);
