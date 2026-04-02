@@ -29,8 +29,26 @@ public class PhantomManager {
     private static final String KEY_INTENT_FILE = "tn.amin.phantom_mic.AUDIO_FILE";
 
     private static final String FILE_CONFIG = "phantom.txt";
+    private static final String FILE_PRESET = "phantom_preset.txt";
 
     private static final int REQUEST_CODE = 2608;
+
+    // Maps preset name strings (from phantom_preset.txt) to nativeSetPreset int values
+    private static final java.util.Map<String, Integer> PRESET_MAP;
+    static {
+        PRESET_MAP = new java.util.HashMap<>();
+        PRESET_MAP.put("NONE",        0);
+        PRESET_MAP.put("ROBOT",       1);
+        PRESET_MAP.put("BABY",        2);
+        PRESET_MAP.put("TEENAGER",    3);
+        PRESET_MAP.put("DEEP",        4);
+        PRESET_MAP.put("DRUNK",       5);
+        PRESET_MAP.put("FAST",        6);
+        PRESET_MAP.put("UNDERWATER",  7);
+        PRESET_MAP.put("SLOW_MOTION", 8);
+        PRESET_MAP.put("REVERSE",     9);
+        PRESET_MAP.put("FUN1",        10);
+    }
 
     private Uri mUriPath;
 
@@ -170,6 +188,21 @@ public class PhantomManager {
         mAudioMaster.load(fd);
 
         Logger.d("Audio file loaded");
+
+        // Apply voice preset from phantom_preset.txt (written by VoiceCommander)
+        String presetName = mFileManager.readLine(mUriPath, FILE_PRESET);
+        if (presetName != null && !presetName.trim().isEmpty()) {
+            Integer presetInt = PRESET_MAP.get(presetName.trim().toUpperCase());
+            if (presetInt != null) {
+                setVoicePreset(presetInt);
+                Logger.d("Voice preset applied: " + presetName.trim() + " (" + presetInt + ")");
+            } else {
+                Logger.d("Unknown preset name: " + presetName.trim() + " — using NONE");
+                setVoicePreset(0);
+            }
+        } else {
+            setVoicePreset(0); // default: no effect
+        }
     }
 
     private void ensureHasUriPath() {
