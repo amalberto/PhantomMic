@@ -51,6 +51,21 @@ public class PhantomManager {
         mSPManager = new SPManager(context);
         mFileManager = new FileManager(context);
 
+        // Race condition fix: if we know the format from a previous session,
+        // set it now so the Resampler is built immediately and decode can start
+        // before the user opens a chat. This eliminates the "first recording uses
+        // mic" issue caused by decode not finishing before the first obtainBuffer.
+        if (mSPManager.hasSavedAudioFormat()) {
+            int sr  = mSPManager.getSavedSampleRate();
+            int enc = mSPManager.getSavedEncoding();
+            int ch  = mSPManager.getSavedChannelMask();
+            Logger.d("Pre-loading saved format: " + sr + "Hz enc=" + enc + " ch=" + ch);
+            mAudioMaster.setFormat(sr, ch, enc);
+            // Kick off decode immediately — by the time the user opens a chat
+            // the buffer will be ready and the first recording will inject correctly.
+            load();
+        }
+
         // Do NOT call nativeHook() here — libaudioclient.so is not yet loaded.
         // It will be called lazily from initNativeHooks() when AudioRecord.startRecording()
         // is intercepted, at which point the library is guaranteed in /proc/self/maps.
@@ -126,6 +141,8 @@ public class PhantomManager {
 
     public void updateAudioFormat(int sampleRate, int channelMask, int encoding) {
         mAudioMaster.setFormat(sampleRate, channelMask, encoding);
+        // Persist so the next app start can pre-load without waiting for ctor_hook.
+        mSPManager.saveAudioFormat(sampleRate, encoding, channelMask);
         Logger.d("Target: " + sampleRate + "Hz, encoding " + encoding + ", channel count " + mAudioMaster.getFormat().getChannelCount());
     }
 
