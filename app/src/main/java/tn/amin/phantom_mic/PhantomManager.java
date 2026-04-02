@@ -60,10 +60,15 @@ public class PhantomManager {
             int enc = mSPManager.getSavedEncoding();
             int ch  = mSPManager.getSavedChannelMask();
             Logger.d("Pre-loading saved format: " + sr + "Hz enc=" + enc + " ch=" + ch);
+            // Only pre-build the Resampler — do NOT start the decode thread yet.
+            // g_phantomBridge is created in nativeHook() (deferred to startRecording),
+            // so calling load() here would start a background thread that calls
+            // onBufferChunkLoaded() JNI with g_phantomBridge still null, then races
+            // with the real nativeHook() call that creates/overwrites g_phantomBridge
+            // → SIGSEGV (null pointer dereference in PhantomBridge::on_buffer_chunk_loaded).
+            // Having the format/Resampler pre-built is the meaningful speedup; the
+            // actual decode (<100ms for a typical MP3) starts from nativeHook().
             mAudioMaster.setFormat(sr, ch, enc);
-            // Kick off decode immediately — by the time the user opens a chat
-            // the buffer will be ready and the first recording will inject correctly.
-            load();
         }
 
         // Do NOT call nativeHook() here — libaudioclient.so is not yet loaded.
